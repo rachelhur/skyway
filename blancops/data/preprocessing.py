@@ -77,18 +77,43 @@ def load_and_process_historic_data(
     objects_to_remove=_DES_UNWANTED_OBJECTS,
     outlier_cutoff_dist=3.5
     ) -> pd.DataFrame:
-    """Loads data from fits file, applies selection criteria, and processes into a clean DataFrame ready for lookup construction and feature engineering.
+    """Load, select, and clean historic observations into a DataFrame.
 
-    Args:
-    =====
-    fits_path (str | Path): str | Path
-        Path to fits file
-    df (pd.DataFrame | None): pd.DataFrame | None
-        DataFrame to process
-    selections (dict): dict
-        Selection criteria for the dataframe. Currently only supports equal, greater than, less than.
+    Reads the FITS catalog (or takes a preloaded DataFrame), applies the
+    configured selection criteria, removes per-object positional outliers and
+    unwanted objects, converts angular columns to radians, restricts to the
+    requested observing timeframe, adds derived columns, and returns the result
+    sorted by timestamp. Ready for lookup construction and feature engineering.
+
+    Parameters
+    ----------
+    fits_path : str or Path, optional
+        Path to the FITS catalog. Read via preprocess_fits when df is not given.
+    df : pd.DataFrame, optional
+        Preloaded observations to process instead of reading from fits_path.
+    start_date, end_date : str or pd.Timestamp, optional
+        Inclusive bounds on the observing timeframe.
+    valid_years, valid_months, valid_days : optional
+        If given, restrict to these calendar components (year/month/day).
+    valid_filters : optional
+        If given, restrict to these photometric filters.
+    selections : list, optional
+        Sequence of (column, value, operator) tuples applied row-wise; operator
+        is one of the keys in _OP_MAP (==, !=, <, >, ...). Defaults to
+        _DES_SELECTION_CRITERIA.
+    objects_to_remove : list, optional
+        Object-name substrings; rows whose object matches any are dropped.
+        Defaults to _DES_UNWANTED_OBJECTS.
+    outlier_cutoff_dist : float, optional
+        Max distance (degrees) a row may sit from its object's median RA/Dec
+        before being dropped as an outlier. Defaults to 3.5.
+
+    Returns
+    -------
+    pd.DataFrame
+        Cleaned observations sorted by timestamp with a reset index.
     """
-    assert fits_path or df, "Provide either fits_path or df, not both."
+    assert fits_path is not None or df is not None, "Provide either fits_path or df."
     if df is None:
         df = preprocess_fits(fits_path)
 
@@ -299,6 +324,34 @@ def _add_field_col(df):
 
 
 def build_DES_lookups(fits_path=None, outdir=None):
+    """Build and persist the DES TrainLookupTables from a raw FITS catalog.
+
+    Loads and cleans the historic DECam observations, factorizes fields to
+    contiguous field_ids (0..N-1), and constructs the per-(field, filter)
+    target counts and exposure times plus start-of-night visit and last-visit
+    snapshots (in both timestamp and observing-time frames). Only observations
+    passing the survey teff quality threshold contribute to targets and running
+    history, while all observed nights are snapshotted so every night is
+    seedable. Writes the assembled tables under outdir and returns them.
+
+    Parameters
+    ----------
+    fits_path : str or Path, optional
+        Source FITS catalog. Defaults to DES_FITS_PATH.
+    outdir : str or Path, optional
+        Destination directory for the written tables. Defaults to DES_DATA_DIR.
+
+    Returns
+    -------
+    TrainLookupTables
+        The constructed lookups, also written to disk via write_to_disk.
+
+    Raises
+    ------
+    ValueError
+        If no observations survive the year/month/day/filter selection, or if
+        none exceed the survey teff threshold.
+    """
     fits_path = Path(fits_path or DES_FITS_PATH).resolve()
     outdir = Path(outdir or DES_DATA_DIR).resolve()
 

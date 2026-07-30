@@ -111,6 +111,27 @@ def apply_cyclical_features(features, base_names, cyclical_names):
             
             
 class StateNormalizer:
+    """Applies and persists the per-feature normalization pipeline.
+
+    Each feature is routed to at most one normalization family based on the
+    name lists passed at construction (matched by full name or base name):
+
+    - sin: sin() of the value (for bounded-angle features).
+    - log: log-scaling.
+    - fractional: divide by a fixed span into [0, 1].
+    - z: global z-score (mean/std over the training set).
+    - local_mean_z (rel): divide by the global std after the caller has already
+      removed a per-sample local mean (the ``rel_*`` features).
+    - local_z: per-sample z-score across bins, storing no global stats.
+    - cyclical: expansion of a value into ``_cos``/``_sin`` pairs.
+
+    Stats are learned on the training indices in ``fit_transform`` and reused
+    unchanged in ``transform`` (inference); the fitted mean/std dicts are what
+    get written to ``normalization_stats.json``. Works on both numpy arrays and
+    torch tensors via a shared backend. When ``fix_nans`` is set, NaN entries
+    (inactive bins) are replaced with ``sentinel_value`` after normalization so
+    the sentinel mask can be saved downstream.
+    """
     def __init__(
         self,
         state_feature_names,

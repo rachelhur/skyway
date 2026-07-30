@@ -1,12 +1,10 @@
 """Precomputed feature cache for the offline RL pipeline.
 
-Two dataclasses are defined here:
-
-- ``RawFeatureCache``: stores all raw (unnormalized) features for every
+``RawFeatureCache``: stores all raw (unnormalized) features for every
   observation in the training dataset, independent of experiment config.
   Computed once by ``precompute-features`` and shared across training runs.
 
-- ``ValDatasetCache``: stores normalized tensors for the validation-night
+``ValDatasetCache``: stores normalized tensors for the validation-night
   subset only, built after a training run has fixed the val/train split and
   normalization stats. Loaded by the evaluation pipeline to avoid
   re-processing on repeated runs.

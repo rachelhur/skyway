@@ -90,9 +90,9 @@ def compute_global_time_only_features(*, timestamp) -> dict:
 def compute_global_pointing_features(timestamp, ra, dec, moon_radec) -> dict:
     """Pointing-dependent global ephemeris features.
 
-    Returns a dict with: ``az``, ``el`` (clipped to ``[0, π/2]``), ``ha``,
-    ``airmass``, and ``sky_brightness_<filter>`` for each filter in
-    ``FILTER2IDX``.
+    Returns a dict with: ``az``, ``el`` (clipped to ``[0, pi/2]``), ``ha``,
+    ``airmass``, ``moon_distance``, and ``sky_brightness_<filter>`` for each
+    filter in ``FILTER2IDX``.
 
     The elevation clip absorbs the precision issue where ``el`` can be
     slightly negative just before sunrise/sunset and propagate into the
@@ -103,6 +103,15 @@ def compute_global_pointing_features(timestamp, ra, dec, moon_radec) -> dict:
     atmospheric refraction and pointing error) and uses a vectorized
     sky-brightness pass for batch efficiency, so it does not call this
     helper.
+
+    Parameters
+    ----------
+    timestamp : float
+        Unix time of the pointing.
+    ra, dec : float
+        Target equatorial coordinates (radians).
+    moon_radec : tuple of float
+        Moon (ra, dec) at ``timestamp``, used for the ``moon_distance`` term.
     """
     features = {}
 
@@ -778,16 +787,18 @@ def compute_causal_fwhm(night_df, seeing_cfg) -> np.ndarray:
     """Per-row causal predicted FWHM (arcsec) for one night.
 
     Builds a Seeing from seeing_cfg, ingests the night's measured
-    (timestamp, fwhm, band, el) rows, then predicts at each row's own
-    (band, el, timestamp) using strictly-past history. Identical logic to
-    PredictiveSeeingModel in the historic env, here predicting at the
-    expert's own pointing for every row. Rows with a NaN measured fwhm are
-    not ingested; predictions for them still resolve from prior history (or
-    the nominal fallback when none exists).
+    (timestamp, fwhm, band, el) rows, then predicts a canonical i-band
+    zenith FWHM at each row's timestamp using strictly-past history. The
+    per-row band/el enter only through ingestion; prediction is pinned to
+    i-band zenith to match PredictiveSeeingModel.fwhm and the live scheduler,
+    so the feature reflects time-evolving atmospheric seeing rather than the
+    expert's chosen airmass. Rows with a NaN measured fwhm are not ingested;
+    predictions for them still resolve from prior history (or the nominal
+    fallback when none exists).
 
-    Args
-    ----
-    night_df : pd.DataFrame
+    Parameters
+    ----------
+        night_df : pd.DataFrame
         One night's rows with columns 'timestamp', 'fwhm', 'filter_idx',
         'el'. Row order is preserved in the output.
     seeing_cfg : SeeingConfig

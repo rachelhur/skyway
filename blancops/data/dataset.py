@@ -1,7 +1,5 @@
-import matplotlib
-import matplotlib.pyplot as plt
-
 import numpy as np
+import pandas as pd
 import json
 import logging
 from pathlib import Path
@@ -10,10 +8,11 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader, Subset, RandomSampler
 
-from blancops.configs.enums import RewardStructure
-from blancops.configs.rl_schema import RewardWeights
+from blancops.configs.enums import Algorithm, RewardStructure
+from blancops.configs.rl_schema import ExperimentConfig, RewardWeights, SeeingConfig
+from blancops.data.feature_cache import RawFeatureCache
+from blancops.data.lookup_tables import LookupTables
 from blancops.ephemerides import ephemerides
-from blancops.math import geometry
 
 from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_FILTER
 
@@ -21,32 +20,26 @@ from blancops.data.features.normalizations import StateNormalizer, build_normali
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-def _overwrite_fwhm_with_causal(df, seeing_cfg):
-    """Replace the raw measured 'fwhm' column with the causal prediction.
-
-    Groups by night and applies compute_causal_fwhm so each row's fwhm is
-    the strictly-past Seeing prediction at that row's own pointing. Matches
-    the historic-eval rollout and live inference fwhm, removing train/serve
-    skew. No-op if 'fwhm' is absent.
-    """
-    from blancops.data.features.glob_features import compute_causal_fwhm
-    if 'fwhm' not in df.columns:
-        return df
-    out = np.empty(len(df), dtype=float)
-    for _, idx in df.groupby('night', sort=False).groups.items():
-        positions = df.index.get_indexer(idx)
-        night_df = df.loc[idx]
-        out[positions] = compute_causal_fwhm(night_df, seeing_cfg)
-    df = df.copy()
-    df['fwhm'] = out
-    return df
-
-
-def _collapse_cyclical_expansions(feature_names, cyclical_names):
+def _collapse_cyclical_expansions(feature_names: list | np.ndarray, cyclical_names: list | np.ndarray) -> list:
     """Collapse ``<name>_cos`` / ``<name>_sin`` pairs back to ``<name>``.
 
     Idempotent on already-collapsed lists.
+    
+    Parameters
+    ----------
+    feature_names : list | np.ndarray
+        List of feature names to collapse.
+    cyclical_names : list | np.ndarray
+        List of cyclical feature names to check for expansions.
+        
+    Returns
+    -------
+    list
+        List of collapsed feature names.
     """
     def _is_cyclical(name):
         return any(
@@ -69,27 +62,62 @@ def _collapse_cyclical_expansions(feature_names, cyclical_names):
             seen.add(base)
     return result
 
+def _overwrite_fwhm_with_causal(df: pd.DataFrame, seeing_cfg: SeeingConfig) -> pd.DataFrame:
+    """If 'fwhm' is present in dataframe, replaces the raw measured 'fwhm' column with the causal prediction.
+
+    Groups by night and applies compute_causal_fwhm so each row's fwhm is
+    the strictly-past i-band zenith seeing prediction at that row's timestamp.
+    Matches the historic validation rollout and live inference fwhm. No-op if
+    'fwhm' is absent.
+    """
+    from blancops.data.features.glob_features import compute_causal_fwhm
+    if 'fwhm' not in df.columns:
+        return df
+    out = np.empty(len(df), dtype=float)
+    for _, idx in df.groupby('night', sort=False).groups.items():
+        positions = df.index.get_indexer(idx)
+        night_df = df.loc[idx]
+        out[positions] = compute_causal_fwhm(night_df, seeing_cfg)
+    df = df.copy()
+    df['fwhm'] = out
+    return df
+
 
 # ---------------------------------------------------------------------------
-# TransitionDataset — all heavy logic
+# TransitionDataset - all heavy logic
 # ---------------------------------------------------------------------------
 
 class TransitionDataset(torch.utils.data.Dataset):
-    """Constructs and stores all RL transitions from a ``RawFeatureCache``.
-
-    Accepts a pre-computed ``RawFeatureCache`` instead of a raw DataFrame so
-    feature engineering is skipped.  Only normalization, reward/action/mask
-    construction, and train/val splitting happen here.
+    """Constructs and stores all RL transitions from a pre-computed ``RawFeatureCache``.
+    
+    Performs state normalization, saves stateful normalization stats to disk, and splits dataset 
+    into train/val sets. All configurations are set by the ``ExperimentConfig``. Reward
+    structure is set by the ``RewardStructure`` enum but currently broken.
+    
+    Parameters
+    ----------
+    mode : str
+        If ``mode == 'train'``, saves normalization stats to disk. Otherwise, applies the caller-provided
+        z_score_stats/rel_norm_stats (typically read from normalization_stats.json).
+    cache : RawFeatureCache
+        Pre-computed feature cache for the offline RL pipeline.
+    cfg : ExperimentConfig
+    lookups : LookupTables
+        Only required when ``reward == RewardStructure.COMPOSITE`` (used by the min-tiling reward).
+    z_score_stats : dict
+        A nested dictionary of z-score normalization statistics for global and bin features.
+    rel_norm_stats : dict
+        A nested dictionary of relative normalization statistics for global and bin features.
     """
 
     def __init__(
         self,
-        mode: str,
-        cache,                  # RawFeatureCache
-        cfg=None,
-        lookups=None,
-        z_score_stats=None,
-        rel_norm_stats=None,
+        mode: str, # 'train' or 'test'
+        cache: RawFeatureCache,                  
+        cfg: ExperimentConfig,
+        lookups: LookupTables=None,
+        z_score_stats: dict=None,
+        rel_norm_stats: dict=None,
     ):
         norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
         self._setup_configuration(cfg, norm_kwargs)
@@ -110,23 +138,22 @@ class TransitionDataset(torch.utils.data.Dataset):
     # Setup
     # ------------------------------------------------------------------
 
-    def _setup_configuration(self, cfg, norm_kwargs):
+    def _setup_configuration(self, cfg: ExperimentConfig, norm_kwargs: dict):
         self._seeing_cfg = cfg.data.seeing
         self.reward = cfg.model.reward
         self.reward_weights = getattr(cfg.model, 'reward_weights', None) or RewardWeights()
         self.reward_norm = getattr(cfg.model, 'reward_norm', 'minmax')
-        self._calculate_action_mask = cfg.model.algorithm != 'bc'
+        self._calculate_action_mask = (cfg.model.algorithm != Algorithm.BC) or (not self.hpGrid.is_azel)
         self.include_bin_features = len(cfg.data.bin_features) > 0
 
         action_space = cfg.data.action_space
         self.num_filters = _NUM_FILTERS if 'filter' in action_space else 1
 
-        # num_actions resolved after nbins is known from cache
         self._action_space_str = action_space
         if action_space == 'filter':
             self.num_actions = self.num_filters
         else:
-            self.num_actions = None  # filled in _load_from_cache
+            self.num_actions = None  # filled in self._load_from_cache
 
         # Collapse any post-expansion feature names (from resolved_config.yaml)
         base_global = _collapse_cyclical_expansions(
@@ -150,7 +177,7 @@ class TransitionDataset(torch.utils.data.Dataset):
     # Load from cache
     # ------------------------------------------------------------------
 
-    def _load_from_cache(self, cache):
+    def _load_from_cache(self, cache: RawFeatureCache):
         missing_global = set(self.global_feature_names) - set(cache.global_feature_names)
         assert not missing_global, (
             f"Global features missing from cache: {missing_global}. "
@@ -203,7 +230,8 @@ class TransitionDataset(torch.utils.data.Dataset):
     # Transition construction
     # ------------------------------------------------------------------
 
-    def _build_transitions(self, action_space):
+    def _build_transitions(self, action_space: str):
+        """Construct transition (state, action, reward, done, action_masks) tensors for the transition dataset."""
         states, bin_states = self._construct_states(
             df=self._df,
             bin_states=self._prenorm_bin_states,
@@ -216,8 +244,7 @@ class TransitionDataset(torch.utils.data.Dataset):
                                           next_state_idxs=self.next_state_idxs)
         rewards = self._construct_rewards(self._df, next_state_idxs=self.next_state_idxs,
                                           reward=self.reward)
-        dones = self._construct_dones(num_transitions=num_transitions,
-                                      next_state_idxs=self.next_state_idxs,
+        dones = self._construct_dones(next_state_idxs=self.next_state_idxs,
                                       current_state_idxs=self.current_state_idxs)
         action_masks = self._construct_action_masks(
             state_df=self._df, action_space=action_space,
@@ -236,7 +263,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         else:
             self._prenorm_bin_states = None
 
-    def _construct_dones(self, num_transitions, next_state_idxs, current_state_idxs):
+    def _construct_dones(self, next_state_idxs, current_state_idxs):
         dones = ~np.isin(next_state_idxs, current_state_idxs)
         dones[-1] = True
         return dones
@@ -335,7 +362,7 @@ class TransitionDataset(torch.utils.data.Dataset):
             return np.ones((num_states, self.num_filters), dtype=np.bool_)
 
         if self._calculate_action_mask:
-            logger.info("Calculating action masks based on horizon…")
+            logger.info("Calculating action masks based on horizon...")
             if not self.hpGrid.is_azel:
                 lon, lat = self.hpGrid.lon, self.hpGrid.lat
                 for i, time in tqdm(
@@ -362,14 +389,32 @@ class TransitionDataset(torch.utils.data.Dataset):
     # Train / val split
     # ------------------------------------------------------------------
 
-    def _split_data(self, train_val_split, seed):
+    def _split_data(self, train_val_split: float, seed: int):
         val_split = 1 - train_val_split
         self.train_transition_idxs, self.val_transition_idxs = self._determine_split(val_split, seed)
         train_c = self.curr_compact_idxs[self.train_transition_idxs]
         train_n = self.next_compact_idxs[self.train_transition_idxs]
         self.train_state_idxs = np.unique(np.concatenate([train_c, train_n]))
 
-    def _determine_split(self, val_split, random_seed, method='by_night'):
+    def _determine_split(self, val_split: float, random_seed: int, method: str = 'by_night'):
+        """Split the dataset into training and validation sets based on the specified method.
+        
+        Parameters
+        ----------
+        val_split : float
+            Fraction of the dataset to be used for validation.
+        random_seed : int
+            Seed for split distribution.
+        method : str
+            ``by_night`` holds out whole nights for validation (at least one night);
+            ``by_transition`` shuffles and holds out individual transitions.
+            Callers currently always use the default ``by_night``.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Train and validation transition indices.
+        """
         np.random.seed(random_seed)
         if method == 'by_night':
             num_val_nights = max(1, int(self.n_nights * val_split))
@@ -393,10 +438,15 @@ class TransitionDataset(torch.utils.data.Dataset):
         return train_indices, val_indices
 
     # ------------------------------------------------------------------
-    # Normalisation
+    # Normalization
     # ------------------------------------------------------------------
 
-    def _normalize_states(self, mode, cfg, norm_kwargs, z_stats, rel_stats):
+    def _normalize_states(self, mode: str, cfg: ExperimentConfig, norm_kwargs: dict, z_stats: dict, rel_stats: dict):
+        """Normalize global and bin states using z-score and/or relative normalization, depending on configuration.
+        
+        If ``mode == 'train'``, saves normalization stats to disk. Otherwise, applies the caller-provided
+        z_score_stats/rel_norm_stats (typically read from normalization_stats.json).
+        """
         global_normalizer = StateNormalizer(
             state_feature_names=self.global_feature_names, **norm_kwargs
         )
@@ -474,8 +524,8 @@ class TransitionDataset(torch.utils.data.Dataset):
     # Tensor formatting & validation
     # ------------------------------------------------------------------
 
-    def _format_tensors_for_network(self, network_type):
-        if network_type == 'mlp':
+    def _format_tensors_for_network(self, network_type): #XXX mlp no longer exists - keep for now
+        if network_type == 'mlp':                           # (mlp had flattened bin states as input)
             if self.include_bin_features and self._prenorm_bin_states is not None:
                 if not isinstance(self.states, torch.Tensor):
                     self.states = torch.as_tensor(self.states, dtype=torch.float32)
@@ -569,11 +619,32 @@ class TransitionDataset(torch.utils.data.Dataset):
 
 
 # ---------------------------------------------------------------------------
-# OfflineDataset — light DataLoader wrapper
+# OfflineDataset - light pytorch DataLoader wrapper
 # ---------------------------------------------------------------------------
 
 class OfflineDataset:
-    """Thin wrapper that creates train/val DataLoaders from a ``TransitionDataset``."""
+    """Thin wrapper that creates train/val pytorch DataLoaders from a ``TransitionDataset``.
+    
+    The train DataLoader uses a RandomSampler with replacement to allow for an effectively infinite stream of samples 
+    (num_samples=10**10). 
+    The val DataLoader is deterministic and does not shuffle.
+    
+    Parameters
+    ----------
+    dataset : TransitionDataset
+        Dataset for which to create DataLoaders.
+    batch_size : int
+        Batch size for the DataLoaders.
+    num_workers : int
+        Number of subprocesses for data loading; 0 loads batches in the main process.
+    pin_memory : bool
+        Whether to pin memory for the DataLoaders. If training on GPU, this should be
+        set to True for better performance.
+    seed : int
+        Random seed for shuffling the training DataLoader.
+    drop_last : bool
+        Whether to drop the last batch in the training DataLoader. Defaults to True.
+    """
 
     def __init__(
         self,

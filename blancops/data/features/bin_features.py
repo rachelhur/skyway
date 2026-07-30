@@ -2,7 +2,7 @@
 """Bin feature computation for both online (live) and offline (batch) pipelines.
  
 The module-level helpers below define the canonical per-timestep computation.
-Both `BlancoEnv._calculate_bin_features` (live, 1 timestep) and
+Both `BaseBlancoEnv._calculate_bin_features` (live, 1 timestep) and
 `BinFeatureEngineer.transform` (offline, batch) drive these primitives — the
 offline pipeline writing per-step outputs into pre-allocated arrays for
 cache-friendliness.
@@ -24,7 +24,7 @@ To add a new feature:
     4. Add feature key to _BIN_FEATURE_NAMES in configs/constants.py
     5. Add feature key and default normalization to _DEFAULT_NORM_MAPPING in configs/constants.py
     
-    If adding a new helper, must also update base_env.py `_calculate_bin_features`
+    If adding a new helper, must also update blancops/environment/base.py `_calculate_bin_features`
     method and `BinFeatureEngineer.transform` method.
 """
 import warnings
@@ -64,7 +64,7 @@ _SUN_EL_LIMIT_DEG = DES.sun_el_limit
  
 # ============================================================================
 # Canonical per-timestep helpers — single source of truth, shared between
-# BinFeatureEngineer (offline batch) and BlancoEnv (live single-step).
+# BinFeatureEngineer (offline batch) and BaseBlancoEnv (live single-step).
 # ============================================================================
  
  
@@ -149,28 +149,48 @@ def compute_bin_progress_features(
     The caller is responsible for converting NaN -> external sentinel via
     ``replace_nan_with_sentinel`` at the end of the pipeline.
  
-    Args
-    ====
-    current_counts: ``(nfields,)`` for non-filter or ``(nfields, nfilters)``
-            for filter mode — current survey-wide visit counts.
-    target_counts: same shape as ``current_counts`` — survey targets.
-    bins_per_field: ``(nfields,)`` int — bin index of each field at this
-        time. May contain ``ZENITH_BIN_NUM`` for invalid mappings.
-    v_mask: ``(nfields,)`` bool — fields to include (above-horizon AND
-        in a valid bin).
-    nbins: total number of bins on the hpGrid.
-    do_filt: True iff filter is part of the action space; controls whether
+    Parameters
+    ----------
+    current_counts : np.ndarray
+        ``(nfields,)`` for non-filter or ``(nfields, nfilters)`` for filter
+        mode; current survey-wide visit counts.
+    target_counts : np.ndarray
+        Same shape as ``current_counts``; survey targets.
+    bins_per_field : np.ndarray
+        ``(nfields,)`` int; bin index of each field at this time. May contain
+        ``ZENITH_BIN_NUM`` for invalid mappings.
+    v_mask : np.ndarray
+        ``(nfields,)`` bool; fields to include (above-horizon AND in a valid
+        bin).
+    nbins : int
+        Total number of bins on the hpGrid.
+    do_filt : bool
+        True iff filter is part of the action space; controls whether
         per-filter outputs are produced.
-    idx2filter: filter idx -> name mapping. Defaults to ``IDX2FILTER``.
-    timestamp:
-    last_visit_timestamps:
-    t_since_last_visit_divisor:
+    idx2filter : dict, optional
+        Filter idx -> name mapping. Defaults to ``IDX2FILTER``.
+    timestamp : float, optional
+        Current time, same units as ``last_visit_timestamps``. Required
+        together with ``last_visit_timestamps`` to emit the staleness
+        (``t_since_last_visit``) features; ignored otherwise.
+    last_visit_timestamps : np.ndarray, optional
+        Per-field last-visit times, ``(nfields,)`` or ``(nfields, nfilters)``;
+        NaN for never-visited. In non-filter mode a 2D array is collapsed to
+        per-field via ``np.nanmax`` over filters. When omitted, no staleness
+        features are produced.
+    t_since_last_visit_divisor : float, optional
+        Divisor applied to each age ``timestamp - last_visit`` to normalize
+        staleness (typically the night's total OT span). Defaults to 1 (no
+        normalization).
 
  
-    Returns:
-        dict with ``num_unvisited_fields``,
-        ``num_incomplete_fields``, ``min_tiling`` (always)
-        and per-filter variants if ``do_filt``.
+    Returns
+    -------
+    dict
+        Keys ``num_unvisited_fields``, ``num_incomplete_fields``, and
+        ``min_tiling`` (always), plus per-filter variants when ``do_filt``.
+        Also ``t_since_last_visit`` (or per-filter ``t_since_last_visit_<filter>``)
+        when ``timestamp`` and ``last_visit_timestamps`` are supplied.
  
     Note on normalization: the "adjusted max" used in ratios is
     ``max(current_at_this_step, target)``, matching the live env. This differs

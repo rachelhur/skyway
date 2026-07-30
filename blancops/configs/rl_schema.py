@@ -151,7 +151,7 @@ class BaseDataConfig(BaseModel):
 class TrainDataConfig(BaseDataConfig):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    years: List[int] = [2013, 2014, 2015, 2016, 2017, 2018, 2019] # full set of data
+    years: List[int] = [2013, 2014, 2015, 2016, 2017, 2018, 2019] # All years of DES
     months: List[int] = [i+1 for i in range(12)]
     days: List[int] = [i+1 for i in range(31)]
     filters: List[str] = [filt for filt in FILTER2IDX.keys()]
