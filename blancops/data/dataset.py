@@ -23,16 +23,12 @@ from blancops.data.splits import NightSplit, resolve_night_split
 logger = logging.getLogger(__name__)
 
 
-# Rows per chunk when gathering bin features; caps the transient read to
-# chunk * n_bins * n_all_feats floats regardless of dataset size.
+# Chunk size for OOM-safe bin feature gathering
 _BIN_GATHER_CHUNK = 1024
 
 
 def _gather_bin_features(bin_features, rows, cols):
     """Read selected rows and feature columns of a bin-feature array in chunks.
-
-    Selecting rows and columns in one pass avoids materializing the
-    all-columns intermediate, which at nside 32 is over 100 GB on its own.
 
     Args:
         bin_features: (n_rows, n_bins, n_all_feats) array or memmap.
