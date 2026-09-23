@@ -16,13 +16,13 @@ def get_workspace_dir() -> Path:
     env_workspace = os.getenv("BLANCOPS_WORKSPACE")
     if env_workspace:
         return Path(env_workspace).resolve()
-        
+
     pointer_file = Path.home() / ".blancops_profile"
     if pointer_file.exists():
         saved_path = pointer_file.read_text().strip()
         if saved_path:
             return Path(saved_path).resolve()
-            
+
     # 3. Fallback to default
     return Path.home() / ".blancops"
 
@@ -58,7 +58,7 @@ _FILTER_DEP_FEATURE_NAMES = [
 _DEFAULT_BC_AZEL_GLOB_FEATURES = [
     't_night', 'moon_phase', 'moon_distance',
     'airmass', 'ha', 'lst', 'el', 'az',
-    'sun_ra', 'sun_dec', 'sun_az', 'sun_el', 
+    'sun_ra', 'sun_dec', 'sun_az', 'sun_el',
     'moon_ra', 'moon_dec', 'moon_az', 'moon_el',
     'is_filter', 'sky_brightness', 'global_mean_tiling',
     'fwhm'
@@ -67,7 +67,7 @@ _DEFAULT_BC_AZEL_BIN_FEATURES = [
     'moon_distance', 'airmass', 'el',
     'delta_az', 'delta_el',
     'pointing_distance',
-    'rel_ha', 'rel_moon_distance', 'rel_t_since_last_visit', 
+    'rel_ha', 'rel_moon_distance', 'rel_t_since_last_visit',
     'rel_min_tiling', 'rel_num_unvisited_fields', 'rel_num_incomplete_fields',
     't_until_set'
 ]
@@ -109,8 +109,8 @@ _BIN_FEATURES = [
     "rel_ha", "rel_moon_distance",
     "delta_az",    # always use
     "delta_el",    # always use
-    "az", 
-    "el", 
+    "az",
+    "el",
     "ra",		# don't use - specific to DES footprint and could cause memorization
     "dec",      # test
     "pointing_distance",       # test
@@ -120,7 +120,7 @@ _BIN_FEATURES = [
     "rel_num_unvisited_fields", # The number of univisited fields in this bin divided by total number of fields in this bin
     "rel_num_incomplete_fields",  # The number of incomplete fields in this bin divided by total number of fields in this bin
     "rel_min_tiling",	# The minimum tiling amongst all fields in this bin, divided by that field's target tiling.
-    "rel_t_since_last_visit", # The last time since this bin has been visited in the survey minus the mean "last time since last visit" across all bins at this timestamp 
+    "rel_t_since_last_visit", # The last time since this bin has been visited in the survey minus the mean "last time since last visit" across all bins at this timestamp
     "t_until_set", # always use
     "t_since_last_visit" # use rel_t_since_last_visit instead
                             # the z-score norm bakes in an assumed survey cadence
@@ -147,19 +147,19 @@ _ALLOWED_NORMS_PER_FEATURE = {
     'az': {'cyclical'},
     'ha': {'cyclical'},
     'lst': {'cyclical'},
-    
+
     # Sun coords
     'sun_ra': {'cyclical'},
     'sun_az': {'cyclical'},
     'sun_el': {'z_score'},
     'sun_dec': {'z_score'},
-    
+
     # Moon coords
     'moon_ra': {'cyclical'},
     'moon_az': {'cyclical'},
     'moon_el': {'z_score'},
     'moon_dec': {'z_score'},
-    
+
     'moon_distance': {'z_score'},
     'sun_distance': {'z_score'},
     'airmass': {'log', 'z_score'},
@@ -169,29 +169,29 @@ _ALLOWED_NORMS_PER_FEATURE = {
     'delta_el': {'z_score'},
     'el': {'z_score'},
     'dec': {'z_score'},
-    
+
     'fwhm': {'log', 'z_score'},
     'urgency': {'log', 'z_score'},
     'survey_progress': {'fractional', 'sin', 'z_score'},
-    
+
     'pointing_distance': ['z_score'],
     'num_unvisited_fields': ['z_score'],
     'num_incomplete_fields': ['z_score'],
     'min_tiling': ['z_score'],
-    
+
     'rel_num_unvisited_fields': {'local_mean_z', 'local_z_score'},
     'rel_num_incomplete_fields': {'local_mean_z', 'local_z_score'},
     'rel_min_tiling': {'local_mean_z', 'local_z_score'},
     'rel_t_since_last_visit': {'local_mean_z', 'log', 'local_z_score'},
     'rel_moon_distance': {'local_mean_z', 'local_z_score'},
     'rel_ha': {'local_mean_z', 'local_z_score'},
-    
+
     't_night': {'fractional'},
     't_survey': {'fractional'},
     'moon_phase': {'fractional'},
     'survey_num_visits_done': {'fractional'},
     't_until_set': {'fractional'},
-    't_since_last_visit': {'fractional', 'z_score', 'log', None}, 
+    't_since_last_visit': {'fractional', 'z_score', 'log', None},
     'global_mean_tiling': {'fractional'},
 }
 
@@ -209,13 +209,13 @@ _DEFAULT_NORM_MAPPING = {
     'sun_az': ['cyclical'],
     'sun_el': ['z_score'],
     'sun_dec': ['z_score'],
-    
+
     # Moon coords
     'moon_ra': ['cyclical'],
     'moon_az': ['cyclical'],
     'moon_el': ['z_score'],
     'moon_dec': ['z_score'],
-    
+
     # Image quality
     'moon_distance': ['z_score'],
     'sun_distance': ['z_score'],
@@ -225,20 +225,20 @@ _DEFAULT_NORM_MAPPING = {
     'delta_el': ['z_score'],
     'fwhm': ['log', 'z_score'],
     'urgency': ['z_score'],
-    
+
     # Bin features
     'pointing_distance': ['z_score'],
     'num_unvisited_fields': ['z_score'],
     'num_incomplete_fields': ['z_score'],
     'min_tiling': ['z_score'],
-    
+
     'rel_num_unvisited_fields': ['local_mean_z'],
     'rel_num_incomplete_fields': ['local_mean_z'],
     'rel_min_tiling': ['local_mean_z'],
     'rel_moon_distance': ['local_mean_z'],
     'rel_ha': ['local_mean_z'],
     'rel_t_since_last_visit': ['local_mean_z'],
-    
+
     't_night': ['fractional'],
     't_survey': ['fractional'],
     'moon_phase': ['fractional'],
@@ -262,7 +262,7 @@ RADEC_BIN_FEAT_SENTINEL = -1.0 # no fields ever
 class EnvSignal(IntEnum):
     WAIT = -2
     NO_FILTER = -1
-    
+
 """
 BLANCO CONSTS
 """
@@ -291,7 +291,7 @@ ZENITH_FILTER = 'null'
 
 """
 
-FILTER INFO 
+FILTER INFO
 
 """
 
