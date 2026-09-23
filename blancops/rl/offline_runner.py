@@ -1,4 +1,4 @@
-from blancops.io.schedule_io import SCHEDULE_KEYS, write_SISPI_from_df
+from blancops.io.file_io import SCHEDULE_KEYS, write_SISPI_from_df
 
 import torch
 import numpy as np

@@ -7,7 +7,7 @@ from pathlib import Path
 from matplotlib import pyplot as plt
 from blancops.io.logger_utils import configure_logger
 from blancops.rl.evaluations.evaluator import build_evaluators, plot_metric_distributions_with_ss_overlay
-from blancops.configs.rl_schema import load_and_validate
+from blancops.configs.experiment_schema import load_and_validate
 import logging
 
 from blancops.utils.sys_utils import get_system_device

@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader, Subset, RandomSampler
 
 from blancops.configs.enums import RewardStructure
-from blancops.configs.rl_schema import RewardWeights
+from blancops.configs.experiment_schema import RewardWeights
 from blancops.ephemerides import ephemerides
 from blancops.math import geometry
 

@@ -7,7 +7,7 @@ from pathlib import Path
 # Import your domain-specific modules
 from blancops.configs.constants import WORKSPACE
 from blancops.configs.enums import Algorithm
-from blancops.configs.rl_schema import ExperimentConfig, load_and_validate
+from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate
 from blancops.rl.registry import _build_bc_policy, _build_q_adapter, build_network
 from blancops.rl.agent import Agent
 from blancops.rl.checkpointer import resolve_weights_path
@@ -19,7 +19,7 @@ from typing import Tuple
 
 class AgentFactory:
     def __init__(self, base_model_dir: str = WORKSPACE / "deployable_models"):
-        """Factory for building scheduling agents
+        """Factory for building scheduling agents.
         
         Args:
             base_model_dir (str, optional): _description_. Defaults to WORKSPACE / "deployable_models".

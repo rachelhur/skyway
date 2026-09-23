@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 import torch
 from torch import nn
 
-from blancops.configs.rl_schema import ExperimentConfig
+from blancops.configs.experiment_schema import ExperimentConfig
 from blancops.configs.enums import _AUTOREGRESSIVE_NETWORKS, Algorithm, ActionArchitecture, Network, ActionSpace, is_autoregressive
 from blancops.rl.neural_nets.neural_nets import (
     ContextualScoreMLP,

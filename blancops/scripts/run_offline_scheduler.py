@@ -9,7 +9,7 @@ import numpy as np
 import gymnasium as gym
 
 from blancops.configs.constants import WORKSPACE
-from blancops.configs.rl_schema import ActionConstraints
+from blancops.configs.experiment_schema import ActionConstraints
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.offline_runner import OfflineRunner
 from blancops.data.lookup_tables import LookupTables

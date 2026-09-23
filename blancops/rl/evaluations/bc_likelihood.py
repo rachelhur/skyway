@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from blancops.configs.rl_schema import load_and_validate
+from blancops.configs.experiment_schema import load_and_validate
 from blancops.data.feature_cache import DatasetCache, dataset_cache_path
 from blancops.rl.agent_factory import AgentFactory
 

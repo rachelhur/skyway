@@ -17,7 +17,7 @@ from blancops.plotting.training_viz import (
     plot_global_feature_distributions, plot_train_metrics,
 )
 from blancops.rl.registry import build_algorithm
-from blancops.configs.rl_schema import ExperimentConfig, load_and_validate, resolve_and_save
+from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate, resolve_and_save
 from blancops.configs.constants import DES_DATA_DIR, WORKSPACE
 from blancops.configs.enums import Algorithm, CheckpointMetric
 

@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 from abc import ABC, abstractmethod
 from blancops.configs.constants import IDX2FILTER
-from blancops.configs.rl_schema import ActionConstraints
+from blancops.configs.experiment_schema import ActionConstraints
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.environment.live_env import LiveBlancoEnv
 from blancops.ephemerides.time_utils import Clock

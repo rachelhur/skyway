@@ -35,7 +35,7 @@ from blancops.configs.constants import (
 )
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
-from blancops.configs.rl_schema import ActionConstraints, load_and_validate
+from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
 from blancops.data.dataset import TransitionDataset
 from blancops.data.feature_cache import RawFeatureCache, DatasetCache, dataset_cache_path
 from blancops.data.splits import NightSplit
@@ -46,7 +46,7 @@ from blancops.rl.agent import filter_first_decode
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.checkpointer import get_checkpoint
 from blancops.rl.offline_runner import OfflineRunner
-from blancops.io.schedule_io import SCHEDULE_KEYS
+from blancops.io.file_io import SCHEDULE_KEYS
 
 from .data_container import (
     DataContainer,
