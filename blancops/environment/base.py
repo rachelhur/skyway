@@ -573,7 +573,7 @@ class BaseBlancoEnv(gym.Env, ABC):
             dtype=bool,
         )
 
-    def _get_slew_time(self, last_fid, current_fid, overhead=30.0):
+    def _get_slew_time(self, last_fid, current_fid, overhead=0.0):
         """Calculates time to move telescope between fields."""
         if last_fid == ZENITH_FIELD_ID:
             blanco = ephemerides.blanco_observer(time=float(self._ts))
