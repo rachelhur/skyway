@@ -24,7 +24,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     fwhm feature hook.
 
     Survey-position context (``_survey_night_idx`` and ``_get_survey_nights_total``)
-    is now derived from ``lookups.night2idx`` and ``lookups.total_nights``,
+    now derived from ``lookups.night2idx`` and ``lookups.total_nights``,
     """
  
     def __init__(
