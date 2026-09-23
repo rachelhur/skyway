@@ -3,7 +3,7 @@ import numpy as np
 import logging
 
 from blancops.configs.constants import _FILTER_DEP_FEATURE_NAMES, FILTER2IDX
-from blancops.configs.rl_schema import NormalizationConfig
+from blancops.configs.experiment_schema import NormalizationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +62,13 @@ def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True):
         if do_filt:
             # has_filt_dep = feat_name in _FILTER_DEP_FEATURE_NAMES
             if has_filt_dep:
-                [feature_names_out.append(f"{feat_name}_{filt}") for filt in FILTER2IDX.keys()] 
+                [feature_names_out.append(f"{feat_name}_{filt}") for filt in FILTER2IDX.keys()]
 
         is_rel_feat = feat_name.startswith('rel_')
         is_delta_feat = feat_name.startswith('delta_')
         never_cyclic_feat = is_rel_feat or is_delta_feat
         is_cyclic = any((feat_name == cyc_feat) or feat_name.endswith(f"_{cyc_feat}") for cyc_feat in cyclical_feature_names)
-        
+
         is_cyclic = is_cyclic and not never_cyclic_feat
         if is_cyclic:
             logger.debug(f"Expanding {feat_name} to {feat_name}_cos and {feat_name}_sin")
@@ -239,7 +239,7 @@ class StateNormalizer:
         """Returns the appropriate math module and converts masks to the correct device."""
         is_torch = torch.is_tensor(state)
         math_backend = torch if is_torch else np
-        
+
         # Convert pre-computed numpy masks to torch bool tensors if necessary
         active_masks = {}
         for key, mask in self.masks.items():
@@ -247,7 +247,7 @@ class StateNormalizer:
                 active_masks[key] = torch.tensor(mask, dtype=torch.bool, device=state.device)
             else:
                 active_masks[key] = mask
-                
+
         return is_torch, math_backend, active_masks
 
     def fit_transform(self, state, train_state_idxs):
@@ -342,11 +342,11 @@ class StateNormalizer:
             return torch.clamp(torch.sqrt(var), min=1e-6)
         else:
             return np.clip(np.nanstd(flat_data, axis=0), a_min=1e-6, a_max=None)
-            
+
     def _build_stats_dict(self, active_features, mean_arr, std_arr):
         """Converts internal tensors/arrays to standard Python floats for JSON serialization."""
         return {
-            feat: {'mean': float(m), 'std': float(s)} 
+            feat: {'mean': float(m), 'std': float(s)}
             for feat, m, s in zip(active_features, mean_arr, std_arr)
         }
 
@@ -365,7 +365,7 @@ class StateNormalizer:
                 torch.tensor(stds, dtype=torch.float32, device=state.device)
             )
         return np.array(means, dtype=np.float32), np.array(stds, dtype=np.float32)
-    
+
     def inverse_transform(self, state, z_stats_dict=None, rel_stats_dict=None, nan_mask=None):
         """
         Reverses fit_transform / transform.
@@ -424,7 +424,7 @@ class StateNormalizer:
                 state[..., m['sin']] = torch.arcsin(torch.clamp(state[..., m['sin']], min=-1.0, max=1.0))
             else:
                 state[..., m['sin']] = np.arcsin(np.clip(state[..., m['sin']], -1.0, 1.0))
-        
+
 
     def inverse_transform_df(self, df, feature_names=None,
                             z_stats_dict=None, rel_stats_dict=None, drop_cyclical_components=False):
@@ -499,7 +499,7 @@ class StateNormalizer:
                 drop_cyclical_components=drop_cyclical_components)
 
         return df
-    
+
 def inverse_cyclical_norm(df, cyclical_feature_names, *,
                           target=None,
                           drop_cyclical_components=False,
@@ -531,7 +531,7 @@ def inverse_cyclical_norm(df, cyclical_feature_names, *,
 
             if drop_cyclical_components:
                 df.drop(columns=[col, sin_col], inplace=True)
-            
+
     return df
 
 def normalize_timestamp(timestamp, sunset_timestamp, sunrise_timestamp):
