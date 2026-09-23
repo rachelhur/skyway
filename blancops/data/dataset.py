@@ -71,7 +71,7 @@ def _overwrite_fwhm_with_causal(df, seeing_cfg):
 def _collapse_cyclical_expansions(feature_names, cyclical_names):
     """Collapse ``<name>_cos`` / ``<name>_sin`` pairs back to ``<name>``.
 
-    Idempotent on already-collapsed lists.
+    Idempotent on already-collapsed lists. # RH: probably a better way to manage features/mappings...
     """
     def _is_cyclical(name):
         return any(
@@ -103,14 +103,14 @@ class TransitionDataset(torch.utils.data.Dataset):
     """Constructs and stores all RL transitions from a ``RawFeatureCache``.
 
     Accepts a pre-computed ``RawFeatureCache`` instead of a raw DataFrame so
-    feature engineering is skipped.  Only normalization, reward/action/mask
-    construction, and train/val/test splitting happen here.
+    feature engineering (i.e., heavy computation) is skipped.
+    Only normalization, reward/action/mask construction, and train/val/test splitting happen here.
     """
 
     def __init__(
         self,
         mode: str,
-        cache,                  # RawFeatureCache
+        cache,                  # RawFeatureCache; XXX why no type? circular import or forgot?
         cfg=None,
         lookups=None,
         z_score_stats=None,
@@ -440,7 +440,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         self.train_state_idxs = np.unique(np.concatenate([train_c, train_n]))
 
     # ------------------------------------------------------------------
-    # Normalisation
+    # Normalization
     # ------------------------------------------------------------------
 
     def _normalize_states(self, mode, cfg, norm_kwargs, z_stats, rel_stats):
