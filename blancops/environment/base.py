@@ -24,7 +24,7 @@ from astropy.time import Time
 import astropy.units as au
 from blancops import math
 from blancops.configs.constants import _NUM_FILTERS
-from blancops.configs.rl_schema import ActionConstraints, ExperimentConfig
+from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig
 from blancops.data.features.bin_features import (
     # Shared per-timestep helpers — single source of truth for bin features.
     _STALENESS_BASE_KEYS,
