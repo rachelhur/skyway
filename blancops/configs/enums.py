@@ -34,7 +34,7 @@ def is_autoregressive(network: Network) -> bool:
 class ActionSpace(str, Enum):
     AZEL_FILTER = 'azel_filter'
     RADEC_FILTER = 'radec_filter'
-    FILTER = 'filter'
+    FILTER = 'filter' # Not functional
     AZEL = 'azel'
     RADEC = 'radec'
 
