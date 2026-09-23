@@ -248,28 +248,6 @@ _DEFAULT_NORM_MAPPING = {
     'global_mean_tiling': ['fractional'],
 }
 
-
-"""
-SISPI FORMAT
-"""
-
-_EMPTY_SISPI_DICT = OrderedDict([
-    ("object",  None),
-    ("seqnum",  None), # 1-indexed
-    ("seqtot",  1),
-    ("seqid",   ""),
-    ("expTime", 90),
-    ("RA",      None),
-    ("dec",     None),
-    ("filter",  None),
-    ("count",   1),
-    ("expType", "object"),
-    ("program", None),
-    ("wait",    "False"),
-    ("propid",  None),
-    ("comment", ""),
-])
-
 """
 
 ENVIRONMENT SENTINEL VALS
