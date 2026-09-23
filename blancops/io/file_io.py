@@ -1,12 +1,10 @@
 from collections import OrderedDict
 
 import numpy as np
-from pathlib import Path
 
 from blancops.configs.constants import IDX2FILTER, WAIT_SIGNAL, ZENITH_BIN_NUM
 from blancops.math import units
 from collections import defaultdict
-import numpy as np
 from pathlib import Path
 
 from blancops.configs.constants import *
@@ -16,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 SCHEDULE_KEYS = {
     "timestamp": 'agent_timestamp',
-    'field_id': 'agent_field_id', 
-    'bin_id': 'agent_bin_id', 
+    'field_id': 'agent_field_id',
+    'bin_id': 'agent_bin_id',
     'filter': 'agent_filter',
     'filter_idx': 'agent_filter_idx'
 }
@@ -141,7 +139,7 @@ def save_survey_schedule(eval_metrics, save_dir, field_lookup, multinight_movie=
         df = pd.DataFrame(data={k: pd.Series(v) for k, v in full_schedule.items()})
         df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter']].map(IDX2FILTER)
         df.to_csv(schedule_path, index=False)
-        
+
     if save_SISPI:
         for night_key, night_dict in eval_metrics.items():
             if 'night' not in night_key:
@@ -188,3 +186,47 @@ def save_survey_schedule(eval_metrics, save_dir, field_lookup, multinight_movie=
             df.to_csv(schedule_path, index=False)
             write_SISPI_from_df(df, SISPI_fn, save_dir, lookups=field_lookup, dt_series=dt_series)
     return full_schedule
+
+# -------------------------------------------------------------- #
+# -------------------- FITS <-> PD.DATAFRAME -------------------- #
+# ------------------------------------------------------------ #
+
+import fitsio
+import pandas as pd
+
+from astropy.time import Time
+import pandas as pd
+
+
+def fits_to_df(fits_path):
+    d = fitsio.read(fits_path)
+    df = pd.DataFrame(d.astype(d.dtype.newbyteorder('='))) # Big-endian/little-endian error
+    return df
+
+def _replace_with_pd_dt(df):
+    df['datetime'] = pd.to_datetime(
+        df['datetime'],
+        format='%Y-%m-%d %H:%M:%S',
+        utc=True,
+        errors='coerce'
+    )
+    return df
+
+def _drop_nan_dts(df):
+    df = df.dropna(subset=['datetime'])
+    return df
+
+def _add_timestamp(df):
+    t_array = Time(df['datetime'].dt.tz_localize(None).values, scale='utc')
+    # .assign() creates and returns a new df with the added column
+    return df.assign(timestamp=t_array.unix.astype(np.int64))
+def _add_night(df):
+    return df.assign(night=(df['datetime'] - pd.Timedelta(hours=12)).dt.date)
+
+def preprocess_fits(fits_path):
+    df = fits_to_df(fits_path)
+    df = df.pipe(_replace_with_pd_dt)\
+            .pipe(_drop_nan_dts)\
+            .pipe(_add_timestamp)\
+            .pipe(_add_night)
+    return df
