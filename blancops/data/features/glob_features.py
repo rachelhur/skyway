@@ -293,6 +293,7 @@ def compute_global_tracker_features(requested_names, tracker, ctx, force_all=Fal
             continue
         out.update(fam["fn"](ctx))
     return out
+
 # ============================================================================
 # GlobalFeatureEngineer — offline batch pipeline.
 # ============================================================================
