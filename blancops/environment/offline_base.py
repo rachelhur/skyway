@@ -107,7 +107,7 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
     def _episode_terminated(self) -> bool:
         last_night_done = (
             self._night_idx >= self.max_nights - 1
-            and self._ts >= self._sunrise_ts
+            and self._ts >= min(self._sunrise_ts, self._night_end_ts)
         )
         all_visited = self._survey_progress_tracker.check_completion()
         return last_night_done or all_visited
