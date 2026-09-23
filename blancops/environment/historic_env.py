@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 from typing import Optional
- 
+
 import numpy as np
- 
+
 from blancops.environment.base import StateSnapshot
 from blancops.environment.seeing_model import PredictiveSeeingModel
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER
- 
+
 import logging
 
 from blancops.environment.offline_base import BaseBlancoOfflineEnv
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     """Validation against historically observed nights.
- 
+
     Driven by a pandas groupby keyed on night. Each night's initial visit
     state comes from `lookups.night2fidfilt_visit_hist[night_id]` (full-survey
     seeded); per-night seeing splines are passed at construction for the
@@ -26,7 +26,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     Survey-position context (``_survey_night_idx`` and ``_get_survey_nights_total``)
     now derived from ``lookups.night2idx`` and ``lookups.total_nights``,
     """
- 
+
     def __init__(
         self,
         *,
@@ -76,7 +76,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     # -----------------------------------------------------------------------
     # OfflineBlancoEnv hooks
     # -----------------------------------------------------------------------
- 
+
     def _get_night_config(self, night_idx: int) -> dict:
         """Build the per-night timing/seed config.
 
@@ -126,7 +126,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             "bin_num":    bin_num,
         }
 
- 
+
     def _build_night_start_snapshot(self, night_idx: int) -> StateSnapshot:
         night_id = self._night_keys[night_idx]
         night_cfg = self._get_night_config(night_idx)
@@ -207,8 +207,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
 
     def _get_survey_nights_total(self) -> Optional[int]:
         return self.lookups.total_nights
- 
+
     def _get_survey_night_idx(self) -> Optional[int]:
         return self._survey_night_idx
 
-            
