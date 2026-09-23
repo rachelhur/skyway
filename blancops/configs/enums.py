@@ -41,11 +41,13 @@ class ActionSpace(str, Enum):
 class RewardStructure(str, Enum):
     EXPERT_ACTION = "expert_action"
     SURVEY_UNIFORMITY = "survey_uniformity"
-    NEGATIVE_SLEW = "negative_slew"
+    SLEW = "slew"
     TEFF = "teff"
     COMPOSITE = "composite" # Turned on and off by weights. See rl_schema.py
 
 class LookupKeys(str, Enum):
+    """Convenient/consistent lookup table names."""
+
     FIELDS = "fields_table.json"
     TARGET_FIDFILT_COUNTS = "target_counts_per_fidfilt.pkl"
     FIDFILT_EXPTIME = "fidfilt_exptime.pkl"
