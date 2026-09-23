@@ -1,15 +1,14 @@
 """
 Telescope registry.
 
-All profiles known to the system are registered here.  The rest of the
-codebase resolves a telescope by calling get_telescope(key) — it never
-imports a specific profile module directly.
+Telescopes can be resolved by calling get_telescope(key).
 
 Adding a new telescope
 ----------------------
-1. Create telescope/<name>.py (see rubin.py or blanco.py as templates).
+1. Create telescope/<name>.py (see blanco.py as template).
 2. Import the profile(s) below and add them to _ALL_PROFILES.
 3. Add the key string to configs/enums.py :: TelescopeKey.
+
 """
 from __future__ import annotations
 

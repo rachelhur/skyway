@@ -12,6 +12,7 @@ from blancops.environment.field_mask_schedule import resolve_positional_mask
 from blancops.data.features.glob_features import calc_twilight, get_night_boundaries
 from blancops.environment.seeing_model import ConstantSeeingModel, PredictiveSeeingModel
 from blancops.configs.constants import FWHM_REF_FILTER
+from blancops.ephemerides.time_utils import unix_to_datetime
 
 import logging
 logger = logging.getLogger(__name__)
