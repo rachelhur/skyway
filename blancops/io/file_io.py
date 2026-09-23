@@ -101,7 +101,8 @@ def write_SISPI_from_df(schedule_df, out_fn, save_dir, lookups, filter_override_
     with open(outpath, 'w') as f:
         json.dump(sispi_list, f, indent=4)
 
-def save_survey_schedule(eval_metrics, save_dir, field_lookup, multinight_movie=True, ep_num=0, save_SISPI=False, SISPI_fn="survey_schedule.json"):
+def save_survey_schedule(eval_metrics, save_dir, field_lookup, multinight_movie=True, ep_num=0, save_SISPI=False,
+                         SISPI_fn="survey_schedule.json"):
     eval_metrics = eval_metrics[f'ep-{ep_num}']
     if multinight_movie:
         schedule_path = Path(save_dir) / "full_survey_schedule.csv"

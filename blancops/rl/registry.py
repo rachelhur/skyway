@@ -124,15 +124,15 @@ def build_network(cfg: ExperimentConfig) -> nn.Module:
             activation=activation_fn,
             use_contextual_gating=cfg.model.contextual_gating,
         )
-    
+
     if cfg.model.network == Network.DUAL_STREAM_MLP:
         layer_norm = cfg.model.algorithm != Algorithm.BC
         return network_class(
-            global_dim=cfg.data.state_dim, 
-            bin_feat_dim=cfg.data.bin_state_dim, 
-            hidden_dim=cfg.model.hidden_dim, 
-            score_dim=cfg.data.num_filters, 
-            activation=activation_fn, 
+            global_dim=cfg.data.state_dim,
+            bin_feat_dim=cfg.data.bin_state_dim,
+            hidden_dim=cfg.model.hidden_dim,
+            score_dim=cfg.data.num_filters,
+            activation=activation_fn,
             use_contextual_gating=False,
             use_layer_norm=layer_norm)
 

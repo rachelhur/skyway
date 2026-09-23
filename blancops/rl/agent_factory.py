@@ -20,7 +20,7 @@ from typing import Tuple
 class AgentFactory:
     def __init__(self, base_model_dir: str = WORKSPACE / "deployable_models"):
         """Factory for building scheduling agents.
-        
+
         Args:
             base_model_dir (str, optional): _description_. Defaults to WORKSPACE / "deployable_models".
         """
@@ -37,7 +37,7 @@ class AgentFactory:
         weights_filename: str = None, # Now defaults to None for auto-detection
         action_decode: str = 'joint'
     ) -> Tuple[Agent, ExperimentConfig, dict]:
-        
+
         # If model_path_or_alias is an absolute path or a path that exists, prefer that
         if isinstance(model_path_or_alias, str) and Path(model_path_or_alias).is_absolute() and Path(model_path_or_alias).exists():
             model_dir = Path(model_path_or_alias)
@@ -49,17 +49,17 @@ class AgentFactory:
         config_path = model_dir / "resolved_config.yaml"
         if not config_path.exists():
             config_path = model_dir / "configs" / "resolved_config.yaml"
-            
+
         if not config_path.exists():
             raise FileNotFoundError(
                 f"Could not find resolved_config.yaml in {model_dir} or {model_dir}/configs/"
             )
-            
+
         cfg = load_and_validate(config_path)
-        
+
         # 1. Resolve which weights file to actually use
         weights_path = self._resolve_weights_path(model_dir, weights_filename)
-        
+
         # 2. Load the policy
         loaded_policy, norm_stats = self.load_policy(weights_path, cfg, device)
 
@@ -70,7 +70,7 @@ class AgentFactory:
             field_choice_method=field_choice_method,
             action_decode=action_decode
         )
-        
+
         return agent, cfg, norm_stats
 
     def _resolve_weights_path(self, model_dir: Path, filename: str = None) -> Path:
@@ -80,13 +80,13 @@ class AgentFactory:
     @staticmethod
     def load_policy(weights_path: Path, cfg: ExperimentConfig, device: str) -> Tuple[torch.nn.Module, dict]:
         core_net = build_network(cfg)
-        
+
         if cfg.model.algorithm == Algorithm.BC:
             policy = _build_bc_policy(cfg, core_net)
         elif cfg.model.algorithm in (Algorithm.DDQN, Algorithm.CQL, Algorithm.IQL):
             # For IQL, algorithm.policy is the policy_net (QFlatPolicy), not the Q-adapter.
             policy = _build_q_adapter(cfg, core_net)
-        
+
         try:
             checkpoint = torch.load(weights_path, map_location=device)
         except Exception as e:
@@ -135,7 +135,7 @@ class AgentFactory:
                     f"Failed to load weights from {weights_path}: state dict keys do "
                     f"not match the policy architecture. {e}"
                 ) from e
-    
+
     def _load_aliases(self) -> dict:
         if self.alias_file.exists():
             with open(self.alias_file, 'r') as f:
@@ -145,7 +145,7 @@ class AgentFactory:
     def resolve_model_dir(self, model_path_or_alias: str) -> Path:
         target_directory_name = self.aliases.get(model_path_or_alias, model_path_or_alias)
         model_path = self.base_dir / target_directory_name
-        
+
         if not model_path.is_dir():
             raise FileNotFoundError(f"Resolved model directory not found: {model_path}")
         return model_path
