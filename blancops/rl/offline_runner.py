@@ -26,6 +26,7 @@ class OfflineRunner:
     def __init__(self, agent, policy, cfg, lookups, num_episodes=1,
                  outdir=None, save_SISPI=True, SISPI_fn="sispi.json",
                  save_state_features=False, save_movie=False, save_mollweide=False,
+                 reset_counts_on_exhaustion=False, # whether or not to reset all counts after all targets complete
                  dump_moonset_q=False):
         self.agent = agent
         self.cfg = cfg
@@ -41,6 +42,11 @@ class OfflineRunner:
         # When True, also saves glob/bin observation arrays as .npz per night
         # for use with diagnostic plot functions. Off by default to protect memory.
         self.save_state_features = save_state_features
+        # When every action is masked because the survey targets reachable at
+        # this moment are complete, zero the visit counts and carry on rather
+        # than idling to the end of the night. Mirrors live operation, where
+        # the scheduler was restarted against a fresh history once it ran out.
+        self.reset_counts_on_exhaustion = reset_counts_on_exhaustion
         # One-shot per-filter Q breakdown at the first post-moonset step.
         self.dump_moonset_q = dump_moonset_q
         self._moonset_dumped = False
@@ -252,6 +258,17 @@ class OfflineRunner:
             while not (terminated or truncated):
                 with torch.no_grad():
                     action_mask = info.get('action_mask', None)
+
+                    if not action_mask.any() and self.reset_counts_on_exhaustion:
+                        base_env = env.unwrapped
+                        logger.warning(
+                            f"Survey targets exhausted at step {i}; zeroing visit "
+                            f"counts and continuing."
+                        )
+                        base_env._survey_progress_tracker.zero_counts()
+                        base_env.compute_action_mask()
+                        info = base_env.get_info()
+                        action_mask = info.get('action_mask', None)
 
                     if not action_mask.any():
                         logger.warning(f"No valid fields available at step {i} (mask is all zeros).")
