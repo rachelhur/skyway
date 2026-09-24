@@ -47,7 +47,11 @@ def get_args():
     parser.add_argument('--top_k', type=int, default=1,
                         help='Number of top runs to keep.')
     parser.add_argument('--dry_run_split', action='store_true',
-                        help='Resolve the night split, write configs/split.json, and exit.')
+                        help=(
+                            'Resolve the night split, write configs/split.json, and exit.'
+                            'Useful only when re-runningon the same split as another run.'
+                        )
+    )
     return parser.parse_args()
 
 
