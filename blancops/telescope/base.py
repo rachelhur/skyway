@@ -21,8 +21,8 @@ class TelescopeProfile:
     -----
     from blancops.telescope import get_telescope
 
-    t_profile = get_telescope("rubin")
-    t_slew  = t_profile.parameters.slew_time(daz=15.0, dalt=5.0)
+    t_profile = get_telescope("blanco")
+    t_slew  = t_profile.parameters.slew.slew_time(distance=15.0)
     ok      = t_profile.constraints.is_observable(az, alt, X, moon_sep, wind, sun_alt)
     loc     = t_profile.site.earth_location()
     """

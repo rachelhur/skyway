@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator, ValidationInfo
 import yaml
@@ -263,10 +265,20 @@ class BaseAlgConfig(BaseModel):
         return self
 
 class RewardConfig(BaseModel):
-    w_slew: float = 1.0
-    w_airmass: float = 1.0
-    w_t_last_visit: float = 1.0
-    w_min_tiling: float = 1.0
+    terms: dict[RewardTerm, float] = Field(
+        default_factory=lambda: {RewardTerm.TEFF: 1.0}, min_length=1
+    )
+    norm: str | None = 'minmax'
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_terms(cls, v: Any) -> Any:
+        return {"terms": {v: 1.0}} if isinstance(v, str) else v
+
+    # w_slew: float = 1.0
+    # w_airmass: float = 1.0
+    # w_t_last_visit: float = 1.0
+    # w_min_tiling: float = 1.0
     # airmass_limit: float = 3.0
     # t_ref_seconds: float = 60*60*12
 
@@ -286,8 +298,6 @@ class BCAlgConfig(BaseAlgConfig):
     alpha_bin: float | None = None
     beta_filter: float | None = None
     zeta_joint: float | None = None
-    reward: RewardStructure | None = None
-    reward_weights: RewardConfig = Field(default_factory=RewardConfig)
 
     @model_validator(mode="after")
     def validate_strategy_requirements(self) -> "BCAlgConfig":
@@ -313,32 +323,29 @@ class BCAlgConfig(BaseAlgConfig):
             raise ValueError('Value must be non-negative')
         return v
 
-class DDQNAlgConfig(BaseAlgConfig):
-    algorithm: Literal[Algorithm.DDQN]
-    reward: RewardStructure = RewardStructure.TEFF
-    reward_weights: RewardConfig = Field(default_factory=RewardConfig)
-    reward_norm: str = 'minmax'
-    tau: float = 0.005 # DDQN specific parameter
-    gamma: float = 0.99 # DDQN specific parameter
+class RLAlgConfig(BaseAlgConfig):
+    reward: RewardConfig = Field(default_factory=RewardConfig)
+    gamma: float = 0.99
+    tau: float = 0.005
 
     @field_validator('tau')
     @classmethod
     def validate_tau(cls, v):
         if not 0 < v <= 1:
-            raise ValueError('tau must be between 0 and 1 exclusive')
+            raise ValueError('tau must be in (0, 1]')
         return v
 
     @field_validator('gamma')
     @classmethod
     def validate_gamma(cls, v):
         if not 0 <= v <= 1:
-            raise ValueError('gamma must be between 0 and 1 inclusive')
+            raise ValueError('gamma must be in [0, 1]')
         return v
 
-    @model_validator(mode="after")
-    def validate_reward(self) -> "DDQNAlgConfig":
-        assert self.reward in RewardStructure, f"Reward structure {self.reward} is not supported."
-        return self
+
+class DDQNAlgConfig(RLAlgConfig):
+    algorithm: Literal[Algorithm.DDQN]
+
 
 class CQLAlgConfig(DDQNAlgConfig):
     algorithm: Literal[Algorithm.CQL]
@@ -352,7 +359,14 @@ class CQLAlgConfig(DDQNAlgConfig):
             raise ValueError('cql_alpha must be positive')
         return v
 
-class IQLAlgConfig(DDQNAlgConfig):
+    @model_validator(mode="after")
+    def validate_reward_bounded(self) -> "CQLAlgConfig":
+        if self.reward.norm != 'minmax':
+            raise ValueError("CQL assumes rewards in [0,1]")
+        return self
+
+
+class IQLAlgConfig(RLAlgConfig):
     algorithm: Literal[Algorithm.IQL]
     expectile: float = 0.7
     awr_beta: float = 3.0

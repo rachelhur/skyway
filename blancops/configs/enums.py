@@ -38,12 +38,12 @@ class ActionSpace(str, Enum):
     AZEL = 'azel'
     RADEC = 'radec'
 
-class RewardStructure(str, Enum):
-    EXPERT_ACTION = "expert_action"
-    SURVEY_UNIFORMITY = "survey_uniformity"
-    SLEW = "slew"
+
+class RewardTerm(str, Enum):
     TEFF = "teff"
-    COMPOSITE = "composite" # Turned on and off by weights. See rl_schema.py
+    SLEW = "slew"
+    EXPERT = "expert"
+
 
 class LookupKeys(str, Enum):
     """Convenient/consistent lookup table names."""

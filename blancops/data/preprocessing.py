@@ -13,7 +13,7 @@ from blancops.math import units
 from blancops.configs.constants import DES_DATA_DIR, DES_FITS_PATH
 from blancops.configs.constants import FILTER2IDX
 from blancops.data.lookup_tables import TrainLookupTables
-from blancops.io.fits_io import preprocess_fits
+from blancops.io.file_io import preprocess_fits
 from blancops.math import units
 
 import logging

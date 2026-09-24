@@ -224,7 +224,7 @@ def _add_timestamp(df):
 def _add_night(df):
     return df.assign(night=(df['datetime'] - pd.Timedelta(hours=12)).dt.date)
 
-def preprocess_fits(fits_path):
+def preprocess_fits(fits_path): # XXX move to preprocessing.py
     df = fits_to_df(fits_path)
     df = df.pipe(_replace_with_pd_dt)\
             .pipe(_drop_nan_dts)\

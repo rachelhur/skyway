@@ -43,19 +43,19 @@ _SITE = ObservingSite(
 # Slew model                                                           #
 # ------------------------------------------------------------------ #
 
-_AZ_SLEW  = None #SlewModel(max_speed=1.5, acceleration=0.5)
-_ALT_SLEW = None #SlewModel(max_speed=1.0, acceleration=0.5)
+# Fit parameters to DECam exposure data (decam-exposures-20251211.fits)
+_SLEW = SlewModel(rate=2.19, intercept=23.51)
 
 # ------------------------------------------------------------------ #
 # Instrument parameters — DECam broadband                             #
 # ------------------------------------------------------------------ #
 
 _PARAMS = TelescopeParameters(
-    az_slew=_AZ_SLEW,
-    alt_slew=_ALT_SLEW,
+    slew=_SLEW,
     readout_time=20.6, # Ref. 3
-    filter_change_time=8.0, # Ref. 3: "hexapod movement, filter change, and others" 
-    shutter_overhead=1.0, # Ref. 3: "approximately 1 sec"
+    overhead_time=8.0, # Ref. 3: "hexapod movement, filter change, and others"; occurs every exposure
+    # filter_change_time defaults to 0 (filter changes overlap with readout)
+    # shutter_overhead=1.0, # Ref. 3: "approximately 1 sec"
     fov_deg=2.2,
     # inter_ccd_gap=(3.0, 2.3), # (long, short) gap between CCDs in mm
 
@@ -121,7 +121,6 @@ _CONSTRAINTS = _BlancoConstraints(
     max_wind_speed_ms=12.0,
     max_sun_alt_deg=-10.0,
     horizon_alt_deg=15.0,
-    bright_star_exclusion_deg=0.10,
     equatorial_limit=EquatorialLimit.from_ha_dec_table(
         _BLANCO_OPERATION_RANGE, max_ha_hours=5.25, dec_floor=-89.0
     ),

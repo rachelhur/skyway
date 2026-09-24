@@ -10,15 +10,18 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader, Subset, RandomSampler
 
-from blancops.configs.enums import RewardStructure
-from blancops.configs.experiment_schema import RewardWeights
+from blancops.configs.enums import RewardTerm
+from blancops.configs.experiment_schema import RLAlgConfig
+from blancops.data.rewards import construct_rewards
 from blancops.ephemerides import ephemerides
-from blancops.math import geometry
+from blancops.math import geometry, units
 
 from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_FILTER
 
 from blancops.data.features.normalizations import StateNormalizer, build_normalizer_kwargs, setup_feature_names
 from blancops.data.splits import NightSplit, resolve_night_split
+from blancops.telescope.base import TelescopeProfile
+from blancops.telescope.registry import get_telescope
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,50 @@ def _collapse_cyclical_expansions(feature_names, cyclical_names):
     return result
 
 
+
+
+# ---------------------------------------------------------------------------
+# OfflineDataset — light DataLoader wrapper
+# ---------------------------------------------------------------------------
+
+class OfflineDataset:
+    """Thin wrapper that creates train/val DataLoaders from a ``TransitionDataset``."""
+
+    def __init__(
+        self,
+        dataset: "TransitionDataset",
+        batch_size: int,
+        num_workers: int,
+        pin_memory: bool,
+        seed: int,
+        drop_last: bool = True,
+    ):
+        self.dataset = dataset
+        generator = torch.Generator().manual_seed(seed)
+
+        train_subset = Subset(dataset, dataset.train_transition_idxs.tolist())
+        val_subset = Subset(dataset, dataset.val_transition_idxs.tolist())
+
+        self.train_loader = DataLoader(
+            train_subset,
+            batch_size=batch_size,
+            sampler=RandomSampler(
+                train_subset, replacement=True, num_samples=10 ** 10, generator=generator
+            ),
+            drop_last=drop_last,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        self.val_loader = DataLoader(
+            val_subset,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+
+
 # ---------------------------------------------------------------------------
 # TransitionDataset — all heavy logic
 # ---------------------------------------------------------------------------
@@ -116,7 +163,9 @@ class TransitionDataset(torch.utils.data.Dataset):
         z_score_stats=None,
         rel_norm_stats=None,
         split_role=None,
+        telescope: TelescopeProfile | None = None
     ):
+        self._telescope = telescope or get_telescope("blanco")
         norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
         self._split_role = split_role
         self._setup_configuration(cfg, norm_kwargs)
@@ -139,10 +188,8 @@ class TransitionDataset(torch.utils.data.Dataset):
 
     def _setup_configuration(self, cfg, norm_kwargs):
         self._seeing_cfg = cfg.data.seeing
-        self.reward = cfg.model.reward
-        self.reward_weights = getattr(cfg.model, 'reward_weights', None) or RewardWeights()
-        self.reward_norm = getattr(cfg.model, 'reward_norm', 'minmax')
-        self._calculate_action_mask = cfg.model.algorithm != 'bc'
+        self.reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
+        self._calculate_action_mask = cfg.model.algorithm != 'bc' # expensive and not needed for bc
         self.include_bin_features = len(cfg.data.bin_features) > 0
 
         action_space = cfg.data.action_space
@@ -241,8 +288,7 @@ class TransitionDataset(torch.utils.data.Dataset):
 
         actions = self._construct_actions(self._df, action_space=action_space,
                                           next_state_idxs=self.next_state_idxs)
-        rewards = self._construct_rewards(self._df, next_state_idxs=self.next_state_idxs,
-                                          reward=self.reward)
+        rewards = self._construct_rewards(self._df, next_state_idxs=self.next_state_idxs)
         dones = self._construct_dones(num_transitions=num_transitions,
                                       next_state_idxs=self.next_state_idxs,
                                       current_state_idxs=self.current_state_idxs)
@@ -300,31 +346,63 @@ class TransitionDataset(torch.utils.data.Dataset):
             filter_indices = next_state_df['filter'].map(FILTER2IDX).values.astype(np.int32)
             return (bin_indices * _NUM_FILTERS) + filter_indices
 
-    def _construct_rewards(self, df, next_state_idxs, reward):
-        if reward == RewardStructure.TEFF:
-            R_tot = df.iloc[next_state_idxs]['teff'].fillna(0).values
-        elif reward == RewardStructure.EXPERT_ACTION:
-            R_tot = np.ones(len(next_state_idxs), dtype=np.float32)
-        elif reward == RewardStructure.COMPOSITE:
-            rw = self.reward_weights
-            R_slew = self._construct_slew_reward()
-            R_airmass = self._construct_airmass_reward(df, next_state_idxs, rw)
-            R_tsince = self._construct_t_since_reward(df, next_state_idxs, rw)
-            R_tiling = self._construct_min_tiling_reward(df, next_state_idxs, rw)
-            R_tot = (rw.w_slew * R_slew
-                     + rw.w_airmass * R_airmass
-                     + rw.w_t_last_visit * R_tsince
-                     + rw.w_min_tiling * R_tiling).astype(np.float32)
-        elif reward is None:
+    def _construct_rewards(self, df, next_state_idxs) -> np.ndarray:
+        if self.reward_cfg is None:
             return np.zeros(len(next_state_idxs), dtype=np.float32)
-        else:
-            raise NotImplementedError
+        return construct_rewards(self.reward_cfg, self._reward_term_inputs(df, next_state_idxs))
 
-        if self.reward_norm == 'minmax':
-            R_tot = (R_tot - R_tot.min()) / (R_tot.max() - R_tot.min())
-        elif self.reward_norm is not None:
-            logger.warning(f"Unknown reward norm: {self.reward_norm}")
-        return R_tot
+    def _reward_term_inputs(self, df, next_state_idxs):
+        next_df = df.iloc[next_state_idxs]
+        # groups = df.groupby(['field_id', 'filter'])
+
+        return {
+            RewardTerm.EXPERT: lambda: dict(n_transitions=len(next_state_idxs)),
+            RewardTerm.TEFF: lambda: dict(teff=next_df['teff'].values),
+            RewardTerm.SLEW: lambda: dict(excess_times=self._excess_dead_times(df, next_state_idxs)),
+        }
+
+    def _excess_dead_times(self, df, next_state_idxs) -> np.ndarray:
+        """Excess dead time beyond the per-visit overhead.
+        """
+        curr_df = df.iloc[self.current_state_idxs]
+        next_df = df.iloc[next_state_idxs]
+        distances = geometry.angular_separation(
+            (curr_df['ra'].values, curr_df['dec'].values),
+            (next_df['ra'].values, next_df['dec'].values),
+        )
+        curr_filters = curr_df['filter'].values
+        filter_change = (curr_filters != next_df['filter'].values) & (curr_filters != ZENITH_FILTER)
+
+        params = self._telescope.parameters
+        return params.dead_time(distances / units.deg, filter_change) - params.visit_overhead(filter_change)
+
+
+
+    # def _construct_rewards(self, df, next_state_idxs, reward):
+    #     if reward == RewardStructure.TEFF:
+    #         R_tot = df.iloc[next_state_idxs]['teff'].fillna(0).values
+    #     elif reward == RewardStructure.EXPERT_ACTION:
+    #         R_tot = np.ones(len(next_state_idxs), dtype=np.float32)
+    #     elif reward == RewardStructure.COMPOSITE:
+    #         rw = self.reward_weights
+    #         R_slew = self._construct_slew_reward()
+    #         # R_airmass = self._construct_airmass_reward(df, next_state_idxs, rw)
+    #         R_tsince = self._construct_t_since_reward(df, next_state_idxs, rw)
+    #         R_tiling = self._construct_min_tiling_reward(df, next_state_idxs, rw)
+    #         R_tot = (rw.w_slew * R_slew
+    #                 #  + rw.w_airmass * R_airmass
+    #                 #  + rw.w_t_last_visit * R_tsince
+    #                  + rw.w_min_tiling * R_tiling).astype(np.float32)
+    #     elif reward is None:
+    #         return np.zeros(len(next_state_idxs), dtype=np.float32)
+    #     else:
+    #         raise NotImplementedError
+
+    #     if self.reward_norm == 'minmax':
+    #         R_tot = (R_tot - R_tot.min()) / (R_tot.max() - R_tot.min())
+    #     elif self.reward_norm is not None:
+    #         logger.warning(f"Unknown reward norm: {self.reward_norm}")
+    #     return R_tot
 
     # def _construct_airmass_reward(self, df, next_state_idxs, rw):
     #     airmass = df.iloc[next_state_idxs]['airmass'].values
@@ -332,27 +410,27 @@ class TransitionDataset(torch.utils.data.Dataset):
     #         (rw.airmass_limit - airmass) / (rw.airmass_limit - 1.0), 0.0, 1.0
     #     )
 
-    def _construct_slew_reward(self):
-        return 1.0 - self.slew_distances.numpy() / np.pi
+    # def _construct_slew_reward(self):
+    #     return 1.0 - self.slew_distances.numpy() / np.pi
 
-    def _construct_t_since_reward(self, df, next_state_idxs, rw):
-        t_diff = df.groupby(['field_id', 'filter'])['timestamp'].diff()
-        t_since = t_diff.iloc[next_state_idxs].fillna(rw.t_ref_seconds).values
-        t_min, t_max = t_since.min(), t_since.max()
-        return (t_since - t_min) / (t_max - t_min) if t_max > t_min else np.ones_like(t_since)
+    # def _construct_t_since_reward(self, df, next_state_idxs, rw):
+    #     t_diff = df.groupby(['field_id', 'filter'])['timestamp'].diff()
+    #     t_since = t_diff.iloc[next_state_idxs].fillna(rw.t_ref_seconds).values
+    #     t_min, t_max = t_since.min(), t_since.max()
+    #     return (t_since - t_min) / (t_max - t_min) if t_max > t_min else np.ones_like(t_since)
 
-    def _construct_min_tiling_reward(self, df, next_state_idxs, rw):
-        field_ids = df.iloc[next_state_idxs]['field_id'].values.astype(int)
-        filter_idxs = df.iloc[next_state_idxs]['filter'].map(FILTER2IDX).values.astype(int)
-        visits_before = df.groupby(['field_id', 'filter']).cumcount().iloc[next_state_idxs].values
-        target_visits = self.lookups.target_fidfilt_counts[field_ids, filter_idxs]
-        safe_target = np.where(target_visits > 0, target_visits, 1)
-        assert ZENITH_FILTER not in df.iloc[next_state_idxs]['filter'].values
-        return np.where(
-            target_visits > 0,
-            np.clip(1.0 - visits_before / safe_target, 0.0, 1.0),
-            0.0,
-        )
+    # def _construct_min_tiling_reward(self, df, next_state_idxs, rw):
+    #     field_ids = df.iloc[next_state_idxs]['field_id'].values.astype(int)
+    #     filter_idxs = df.iloc[next_state_idxs]['filter'].map(FILTER2IDX).values.astype(int)
+    #     visits_before = df.groupby(['field_id', 'filter']).cumcount().iloc[next_state_idxs].values
+    #     target_visits = self.lookups.target_fidfilt_counts[field_ids, filter_idxs]
+    #     safe_target = np.where(target_visits > 0, target_visits, 1)
+    #     assert ZENITH_FILTER not in df.iloc[next_state_idxs]['filter'].values
+    #     return np.where(
+    #         target_visits > 0,
+    #         np.clip(1.0 - visits_before / safe_target, 0.0, 1.0),
+    #         0.0,
+    #     )
 
     def _construct_action_masks(self, state_df, action_space, num_states, state_idxs):
         state_df = state_df.iloc[state_idxs]
@@ -613,45 +691,3 @@ class TransitionDataset(torch.utils.data.Dataset):
                 'bin_features': self.bin_rel_stats,
             },
         }
-
-
-# ---------------------------------------------------------------------------
-# OfflineDataset — light DataLoader wrapper
-# ---------------------------------------------------------------------------
-
-class OfflineDataset:
-    """Thin wrapper that creates train/val DataLoaders from a ``TransitionDataset``."""
-
-    def __init__(
-        self,
-        dataset: TransitionDataset,
-        batch_size: int,
-        num_workers: int,
-        pin_memory: bool,
-        seed: int,
-        drop_last: bool = True,
-    ):
-        self.dataset = dataset
-        generator = torch.Generator().manual_seed(seed)
-
-        train_subset = Subset(dataset, dataset.train_transition_idxs.tolist())
-        val_subset = Subset(dataset, dataset.val_transition_idxs.tolist())
-
-        self.train_loader = DataLoader(
-            train_subset,
-            batch_size=batch_size,
-            sampler=RandomSampler(
-                train_subset, replacement=True, num_samples=10 ** 10, generator=generator
-            ),
-            drop_last=drop_last,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
-        self.val_loader = DataLoader(
-            val_subset,
-            batch_size=batch_size,
-            shuffle=False,
-            drop_last=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )

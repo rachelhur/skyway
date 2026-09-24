@@ -22,7 +22,7 @@ from dataclasses import replace
 
 from blancops.telescope.base import TelescopeProfile
 from blancops.telescope.constraints import ConstraintSet
-from blancops.telescope.parameters import SlewModel, TelescopeParameters
+from blancops.telescope.parameters import TelescopeParameters
 from blancops.telescope.site import ObservingSite
 
 # ------------------------------------------------------------------ #
@@ -43,19 +43,16 @@ _SITE = ObservingSite(
 # Source: LSST System Requirements Document LPM-17 §3.2
 #   - Az  : 7 deg/s peak,  7 deg/s² accel  (cable-wrap limited to ±270°)
 #   - Alt : 3.5 deg/s peak, 3.5 deg/s² accel
-# The kinematic model in SlewModel gives conservative times;
-# settle + readout start overlap is handled via visit_overhead().
+# TODO: fit SlewModel(rate, intercept) to Rubin visit data.
 
-_AZ_SLEW  = SlewModel(max_speed=7.0,  acceleration=7.0)
-_ALT_SLEW = SlewModel(max_speed=3.5,  acceleration=3.5)
+_SLEW = None
 
 # ------------------------------------------------------------------ #
 # Instrument parameters                                                #
 # ------------------------------------------------------------------ #
 
 _PARAMS = TelescopeParameters(
-    az_slew=_AZ_SLEW,
-    alt_slew=_ALT_SLEW,
+    slew=_SLEW,
 
     # LSSTCam readout: ~2.3 s for 15-second snaps (pipelined)
     readout_time=2.3,
@@ -64,7 +61,7 @@ _PARAMS = TelescopeParameters(
     filter_change_time=120.0,
 
     # Shutter open+close: ≈1 s
-    shutter_overhead=1.0,
+    overhead_time=1.0,
 
     # Effective focal-plane diameter.
     # LSSTCam: 641 mm diameter FP on a 8.36 m (effective) primary → 3.5° FOV
@@ -115,10 +112,6 @@ _CONSTRAINTS = _RubinConstraints(
     # use a scalar floor of 20° as a conservative proxy.
     # To plug in the real mask: _CONSTRAINTS = replace(_CONSTRAINTS, horizon_mask=my_fn)
     horizon_alt_deg=20.0,
-
-    # Bright star exclusion: Rubin FoV is 3.5°, but bright stars cause diffraction
-    # spikes and bleed columns affecting nearby CCDs; 0.17° is ~10 arcmin exclusion.
-    bright_star_exclusion_deg=0.17,
 )
 
 # ------------------------------------------------------------------ #
