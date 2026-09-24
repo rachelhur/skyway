@@ -12,7 +12,8 @@ from torch.utils.data import DataLoader, Subset, RandomSampler
 
 from blancops.configs.enums import RewardTerm
 from blancops.configs.experiment_schema import RLAlgConfig
-from blancops.data.rewards import construct_rewards
+from blancops.data.norm_stats import NormStats
+from blancops.data.rewards import combine_rewards, normalize_rewards, reward_norm_stats
 from blancops.ephemerides import ephemerides
 from blancops.math import geometry, units
 
@@ -156,15 +157,14 @@ class TransitionDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        mode: str,
         cache,                  # RawFeatureCache; XXX why no type? circular import or forgot?
         cfg=None,
         lookups=None,
-        z_score_stats=None,
-        rel_norm_stats=None,
+        norm_stats: NormStats | None = None,     # None: fit on this dataset's training transitions
         split_role=None,
         telescope: TelescopeProfile | None = None
     ):
+        self._given_norm_stats = norm_stats
         self._telescope = telescope or get_telescope("blanco")
         norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
         self._split_role = split_role
@@ -178,7 +178,8 @@ class TransitionDataset(torch.utils.data.Dataset):
         self._load_from_cache(cache)
         self._build_transitions(cfg.data.action_space)
         self._split_data(cfg)
-        self._normalize_states(mode, cfg, norm_kwargs, z_score_stats, rel_norm_stats)
+        self._normalize_rewards()
+        self._normalize_states(norm_kwargs)
         self._format_tensors_for_network(cfg.model.network)
         self._validate_dataset()
 
@@ -347,9 +348,24 @@ class TransitionDataset(torch.utils.data.Dataset):
             return (bin_indices * _NUM_FILTERS) + filter_indices
 
     def _construct_rewards(self, df, next_state_idxs) -> np.ndarray:
+        """Unnormalized rewards; scaled later by _normalize_rewards."""
         if self.reward_cfg is None:
             return np.zeros(len(next_state_idxs), dtype=np.float32)
-        return construct_rewards(self.reward_cfg, self._reward_term_inputs(df, next_state_idxs))
+        return combine_rewards(self.reward_cfg, self._reward_term_inputs(df, next_state_idxs))
+
+    def _normalize_rewards(self) -> None:
+        """Fit reward stats on the training transitions (or take the given ones) and scale all rewards."""
+        self._reward_stats = None
+        if self.reward_cfg is None:
+            return
+        R_tot = self.rewards.numpy()
+        if self._given_norm_stats is None:
+            self._reward_stats = reward_norm_stats(self.reward_cfg, R_tot[self.train_transition_idxs])
+        else:
+            self._reward_stats = self._given_norm_stats.reward
+        self.rewards = torch.as_tensor(
+            normalize_rewards(self.reward_cfg, R_tot, self._reward_stats), dtype=torch.float32
+        )
 
     def _reward_term_inputs(self, df, next_state_idxs):
         next_df = df.iloc[next_state_idxs]
@@ -521,7 +537,9 @@ class TransitionDataset(torch.utils.data.Dataset):
     # Normalization
     # ------------------------------------------------------------------
 
-    def _normalize_states(self, mode, cfg, norm_kwargs, z_stats, rel_stats):
+    def _normalize_states(self, norm_kwargs):
+        """Fit feature stats on the training states (or apply the given ones) and set self.norm_stats."""
+        fit = self._given_norm_stats is None
         global_normalizer = StateNormalizer(
             state_feature_names=self.global_feature_names, **norm_kwargs
         )
@@ -529,36 +547,30 @@ class TransitionDataset(torch.utils.data.Dataset):
             state_feature_names=self.bin_feature_names, **norm_kwargs
         )
 
-        if mode == 'train':
-            self.states, self.global_zscore_stats, self.global_rel_stats, self.global_sentinel_mask = \
+        if fit:
+            self.states, glob_z, glob_rel, self.global_sentinel_mask = \
                 global_normalizer.fit_transform(
                     state=self.states, train_state_idxs=self.train_state_idxs
                 )
         else:
             self.states, self.global_sentinel_mask = global_normalizer.transform(
-                state=self.states,
-                z_stats_dict=(z_stats or {}).get('global_features', {}),
-                rel_stats_dict=(rel_stats or {}).get('global_features', {}),
+                state=self.states, **self._given_norm_stats.normalizer_kwargs('global_features')
             )
-            self.global_zscore_stats, self.global_rel_stats = None, None
 
+        bin_z, bin_rel = None, None
         if self.include_bin_features and self._prenorm_bin_states is not None:
             bin_tensor = torch.as_tensor(self._prenorm_bin_states)
-            if mode == 'train':
-                self._prenorm_bin_states, self.bin_zscore_stats, self.bin_rel_stats, self.bin_sentinel_mask = \
+            if fit:
+                self._prenorm_bin_states, bin_z, bin_rel, self.bin_sentinel_mask = \
                     bin_normalizer.fit_transform(
                         state=bin_tensor, train_state_idxs=self.train_state_idxs
                     )
             else:
                 self._prenorm_bin_states, self.bin_sentinel_mask = bin_normalizer.transform(
-                    state=bin_tensor,
-                    z_stats_dict=(z_stats or {}).get('bin_features', {}),
-                    rel_stats_dict=(rel_stats or {}).get('bin_features', {}),
+                    state=bin_tensor, **self._given_norm_stats.normalizer_kwargs('bin_features')
                 )
-                self.bin_zscore_stats, self.bin_rel_stats = None, None
         else:
             self.bin_sentinel_mask = None
-            self.bin_zscore_stats, self.bin_rel_stats = None, None
 
         # (n_states, n_bins): True where bin has no sentinel values at this timestep
         if self.bin_sentinel_mask is not None:
@@ -566,34 +578,11 @@ class TransitionDataset(torch.utils.data.Dataset):
         else:
             self.active_bin_mask = None
 
-        if mode == 'train' and (self.global_zscore_stats or self.global_rel_stats):
-            self._save_norm_stats(Path(cfg.outdir))
-
-    def _save_norm_stats(self, save_dir):
-        all_stats = {
-            "z_score": {
-                'global_features': self.global_zscore_stats,
-                'bin_features': self.bin_zscore_stats,
-            },
-            "rel_norm": {
-                'global_features': self.global_rel_stats,
-                'bin_features': self.bin_rel_stats,
-            },
-            "sentinel_mask": {
-                "global": (
-                    self.global_sentinel_mask.any(dim=0).tolist()
-                    if self.global_sentinel_mask is not None else []
-                ),
-                "bin": (
-                    self.bin_sentinel_mask.any(dim=(0, 1)).tolist()
-                    if self.bin_sentinel_mask is not None else []
-                ),
-            },
-        }
-        save_path = Path(save_dir) / "checkpoints" / "normalization_stats.json"
-        with open(save_path, 'w') as f:
-            json.dump(all_stats, f, indent=4)
-        logger.info(f"Normalization stats saved to {save_path}")
+        self.norm_stats = self._given_norm_stats if not fit else NormStats(
+            z_score={'global_features': glob_z, 'bin_features': bin_z},
+            rel_norm={'global_features': glob_rel, 'bin_features': bin_rel},
+            reward=self._reward_stats,
+        )
 
     # ------------------------------------------------------------------
     # Tensor formatting & validation
@@ -679,15 +668,3 @@ class TransitionDataset(torch.utils.data.Dataset):
             bin_n,
             self.slew_distances[idx],
         )
-
-    def get_norm_stats(self) -> dict:
-        return {
-            "z_score": {
-                'global_features': self.global_zscore_stats,
-                'bin_features': self.bin_zscore_stats,
-            },
-            "rel_norm": {
-                'global_features': self.global_rel_stats,
-                'bin_features': self.bin_rel_stats,
-            },
-        }

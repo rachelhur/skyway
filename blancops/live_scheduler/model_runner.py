@@ -232,14 +232,11 @@ class AIModelRunner(ModelRunner):
 
     def _build_env(self, telemetry_now, sun_elevation_deg, seeing_window):
         constraints_cfg = ActionConstraints(sun_el_limit=sun_elevation_deg) # Uses default constraints
-        zscore_stats = self.norm_stats.get('z_score', {})
-        rel_norm_stats = self.norm_stats.get('rel_norm', {})
         env = LiveBlancoEnv(
             cfg=self.cfg,
             constraints_cfg=constraints_cfg,
             lookups=self.lookups,
-            z_score_stats=zscore_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=self.norm_stats,
             telemetry_init=telemetry_now,
             seeing_window=seeing_window
         )

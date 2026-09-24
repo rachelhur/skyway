@@ -38,6 +38,7 @@ from blancops.math.interpolate import interpolate_on_sphere
 from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
 from blancops.data.dataset import TransitionDataset
 from blancops.data.feature_cache import RawFeatureCache, DatasetCache, dataset_cache_path
+from blancops.data.norm_stats import NormStats
 from blancops.data.splits import NightSplit
 from blancops.data.features.normalizations import build_normalizer
 from blancops.data.lookup_tables import LookupTables, TrainLookupTables
@@ -46,6 +47,7 @@ from blancops.rl.agent import filter_first_decode
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.checkpointer import get_checkpoint
 from blancops.rl.offline_runner import OfflineRunner
+from blancops.telescope import get_telescope
 from blancops.io.file_io import SCHEDULE_KEYS
 
 from .data_container import (
@@ -108,8 +110,9 @@ def build_evaluators(
 
     # Checkpoint + normalizers
     checkpoint = get_checkpoint(outdir, device=device)
-    zscore_stats = checkpoint['norm_stats'].get('z_score', {})
-    rel_norm_stats = checkpoint['norm_stats'].get('rel_norm', {})
+    norm_stats = NormStats.from_dict(checkpoint['norm_stats'])
+
+    telescope = get_telescope("blanco")
 
     # Load val dataset from cache or reconstruct from feature cache
     lookups = TrainLookupTables.load_from_dir(DES_DATA_DIR / "lookups")
@@ -140,9 +143,8 @@ def build_evaluators(
         full_cache = RawFeatureCache.load(feature_cache_dir, mmap_bin=True)
         val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
-            mode='test', cache=val_raw_cache, cfg=cfg, lookups=lookups,
-            z_score_stats=zscore_stats, rel_norm_stats=rel_norm_stats,
-            split_role=split,
+            cache=val_raw_cache, cfg=cfg, lookups=lookups,
+            norm_stats=norm_stats, split_role=split, telescope=telescope,
         )
         DatasetCache.from_transition_dataset(val_dataset, split=split).save(val_cache_path)
 
@@ -181,7 +183,7 @@ def build_evaluators(
     env = HistoricBlancoEnv(
         cfg=cfg, constraints_cfg=ActionConstraints(), lookups=lookups,
         global_pd_nightgroup=nightgroup, night_start_bin_states=night_start_bin_states,
-        z_score_stats=zscore_stats, rel_norm_stats=rel_norm_stats,
+        norm_stats=norm_stats, telescope=telescope,
     )
 
     # Containers + plotters + evaluators
@@ -189,7 +191,7 @@ def build_evaluators(
     ss_data = SingleStepDataContainer(val_dataset, action_space, lookups,
                                      global_normalizer=global_normalizer)
 
-    ms_data = MultiStepDataContainer(val_dataset, action_space, lookups, z_score_stats=zscore_stats, rel_norm_stats=rel_norm_stats,
+    ms_data = MultiStepDataContainer(val_dataset, action_space, lookups, norm_stats=norm_stats,
                                      global_normalizer=global_normalizer)
 
     ss_plotter = EvaluationPlotter(ss_outdir, style=style)
@@ -422,18 +424,19 @@ class Evaluator(ABC):
         self.plotter.plot_violin_per_filter(combined_df, key_metric=key_metric)
 
     def plot_metric_distributions(self):
-        metrics = ['airmass', 'ha', 'slew_dist']
+        metrics = ['airmass', 'slew_dist']
 
         expert_df = self.data.expert_df.copy()
         agent_df = self.data.agent_df.copy()
-        expert_df['ha'] /= units.deg
-        agent_df['ha'] /= units.deg
+        for _df in (expert_df, agent_df):
+            if 'ha' in _df.columns:
+                _df['ha'] /= units.deg
 
         # Remove slew distances > 35 degrees (arbitrary cutoff) # XXX need to check train data construction
         expert_df['slew_dist'] = expert_df['slew_dist'].where(expert_df['slew_dist'] < 10, np.nan)
         agent_df['slew_dist'] = agent_df['slew_dist'].where(agent_df['slew_dist'] < 10, np.nan)
 
-        expert_df = expert_df[metrics].assign(source='Expert')
+        expert_df = expert_df[metrics].assign(source='DES')
         agent_df  = agent_df[metrics].assign(source='BC Agent')
 
         # 3. Combine into a single long-format DataFrame
@@ -939,14 +942,13 @@ def plot_metric_distributions_with_ss_overlay(
 
     fig, axs = ms_evaluator.plot_metric_distributions()
 
-    metrics = ['airmass', 'ha', 'slew_dist']
+    metrics = ['airmass', 'slew_dist']
     ss_agent_df  = ss_evaluator.data.agent_df.copy()
 
     if 'ha' in ss_agent_df.columns:
         ss_agent_df['ha'] = ss_agent_df['ha'] / units.deg
     if 'slew_dist' in ss_agent_df.columns:
         ss_agent_df['slew_dist']  = ss_agent_df['slew_dist'].where(ss_agent_df['slew_dist']  < 10, np.nan)
-
     SS_COLOR = 'black'
     SS_STYLE = 'solid'
     SS_LW = 2

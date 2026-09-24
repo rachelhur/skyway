@@ -535,9 +535,9 @@ class EvaluationPlotter:
         plt.tight_layout(pad=0.5)
 
     def _plot_metric_distributions(self, combined_df, metrics, label_fontsize=20):
-        # Vertical layout for 5 stacked metrics
-        FIG_SIZE = (9, 11.0 * 4/5)
-        COLORS = {'Expert': self.style.expert_color, 'BC Agent': self.style.agent_color}
+        # One stacked panel per metric
+        FIG_SIZE = (9, 2.93 * len(metrics))
+        COLORS = {'DES': self.style.expert_color, 'BC Agent': self.style.agent_color}
 
         fig, axes = plt.subplots(nrows=len(metrics), ncols=1, figsize=FIG_SIZE)
 
@@ -545,6 +545,10 @@ class EvaluationPlotter:
             'airmass': 'Airmass',
             'ha': 'Hour angle (deg)',
             'slew_dist': 'Slew Distance (deg)'
+        }
+
+        xlim_mapping = {
+            'airmass': (None, 1.65),
         }
 
         for i, metric in enumerate(metrics):
@@ -556,7 +560,7 @@ class EvaluationPlotter:
                 x           = metric,
                 hue         = 'source',
                 palette     = COLORS,
-                hue_order   = ['Expert', 'BC Agent'],
+                hue_order   = ['DES', 'BC Agent'],
                 fill        = True,
                 alpha       = 0.25,
                 common_norm = False,
@@ -575,6 +579,8 @@ class EvaluationPlotter:
                     alpha=0.8
                 )
 
+            if metric in xlim_mapping:
+                ax.set_xlim(*xlim_mapping[metric])
             ax.set_title(title_mapping[metric], loc='left', fontsize=label_fontsize, pad=4, fontweight='semibold')
             ax.set_ylabel('Density', fontsize=label_fontsize)
             ax.set_xlabel('')  # Keeping x-axis clear as the metric title explains the values
@@ -588,7 +594,7 @@ class EvaluationPlotter:
         # Places a single clean legend at the top right of the overall figure
         axes[0].legend(
             handles=[
-                patches.Patch(color=self.style.expert_color, label='Expert'),
+                patches.Patch(color=self.style.expert_color, label='DES'),
                 patches.Patch(color=self.style.agent_color,  label='BC Agent'),
             ],
             fontsize=label_fontsize,

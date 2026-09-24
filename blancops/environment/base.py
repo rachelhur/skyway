@@ -24,7 +24,10 @@ from astropy.time import Time
 import astropy.units as au
 from blancops import math
 from blancops.configs.constants import _NUM_FILTERS
-from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig
+from blancops.configs.enums import RewardTerm
+from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig, RLAlgConfig
+from blancops.data.rewards import combine_rewards, normalize_rewards
+from blancops.data_quality.teff import predict_teff
 from blancops.data.features.bin_features import (
     # Shared per-timestep helpers — single source of truth for bin features.
     _STALENESS_BASE_KEYS,
@@ -45,6 +48,7 @@ from blancops.data.features.glob_features import (
     compute_global_tracker_features,
 )
 from blancops.data.features.normalizations import StateNormalizer, apply_cyclical_features, build_normalizer_kwargs, normalize_timestamp, setup_feature_names
+from blancops.data.norm_stats import NormStats
 from blancops.environment.survey_tracker import SurveyProgressTracker
 from blancops.environment.seeing_model import SeeingModel
 from blancops.math import units
@@ -133,16 +137,14 @@ class BaseBlancoEnv(gym.Env, ABC):
         cfg: ExperimentConfig,
         constraints_cfg: ActionConstraints,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats: NormStats,
         telescope: TelescopeProfile | None = None,
     ):
         super().__init__()
         # Configuration, Normalizations, and Lookups
         self.cfg = cfg
         self.lookups = lookups
-        self._z_score_stats = z_score_stats
-        self._rel_norm_stats = rel_norm_stats
+        self._norm_stats = norm_stats
         self.airmass_limit = constraints_cfg.airmass_limit
         self.airmass_failsafe = constraints_cfg.airmass_failsafe
         self.sun_el_limit = constraints_cfg.sun_el_limit
@@ -154,6 +156,11 @@ class BaseBlancoEnv(gym.Env, ABC):
         # sun limits (see set_constraints).
         self._telescope = telescope if telescope is not None else get_telescope("blanco")
         self._equatorial_limit = self._telescope.constraints.equatorial_limit
+
+        # Reward: same terms as the offline dataset, scaled with the training reward stats.
+        # _step_record is set by _advance_after_action (None on WAIT).
+        self._reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
+        self._step_record: dict | None = None
 
         # Feature Configs
         norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
@@ -294,7 +301,6 @@ class BaseBlancoEnv(gym.Env, ABC):
 
     def step(self, action: dict):
         assert self.action_space.contains(action), f"Invalid action {action}"
-        last_field_id = np.int32(self._field_id)
 
         # Subclass-defined: advance time, update visit counters, possibly roll
         # into a new night (offline) or fast-forward on WAIT (online).
@@ -305,7 +311,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         if self.include_bin_features:
             self._bin_state = self._calculate_bin_features()
 
-        reward = self._get_rewards(last_field_id, self._field_id)
+        reward = self._get_rewards()
         terminated = self._episode_terminated()
         truncated = False
 
@@ -475,16 +481,12 @@ class BaseBlancoEnv(gym.Env, ABC):
         """Normalizes and returns the current state"""
         global_state = np.array(self._global_state, dtype=np.float32)
         global_state_normed, glob_nan_mask = self.global_normalizer.transform(
-            global_state,
-            self._z_score_stats['global_features'],
-            self._rel_norm_stats['global_features']
+            global_state, **self._norm_stats.normalizer_kwargs('global_features')
         )
         if self.include_bin_features:
             bin_state_arr = np.array(self._bin_state, dtype=np.float32)
             bin_state_normed, bin_nan_mask = self.bin_normalizer.transform(
-                bin_state_arr,
-                self._z_score_stats['bin_features'],
-                self._rel_norm_stats['bin_features']
+                bin_state_arr, **self._norm_stats.normalizer_kwargs('bin_features')
             )
         else:
             bin_state_normed = np.array([], dtype=np.float32)
@@ -573,8 +575,21 @@ class BaseBlancoEnv(gym.Env, ABC):
             dtype=bool,
         )
 
-    def _get_slew_time(self, last_fid, current_fid, overhead=0.0):
-        """Calculates time to move telescope between fields."""
+    def _slew_distance(self, last_fid: int, current_fid: int) -> float:
+        """On-sky distance between two fields; the zenith start uses the zenith at self._ts.
+
+        Parameters
+        ----------
+        last_fid : int
+            Previous field id, or ZENITH_FIELD_ID at the start of a night.
+        current_fid : int
+            Next field id.
+
+        Returns
+        -------
+        float
+            Angular separation in radians.
+        """
         if last_fid == ZENITH_FIELD_ID:
             blanco = ephemerides.blanco_observer(time=float(self._ts))
             last_pos = np.array(blanco.radec_of('0', '90'))
@@ -582,8 +597,24 @@ class BaseBlancoEnv(gym.Env, ABC):
             last_pos = self._ra_arr[last_fid], self._dec_arr[last_fid]
 
         current_pos = self._ra_arr[current_fid], self._dec_arr[current_fid]
-        distance = math.geometry.angular_separation(last_pos, current_pos)
-        return math.geometry.blanco_slew_time(distance) + overhead
+        return math.geometry.angular_separation(last_pos, current_pos)
+
+    def _get_dead_time(self, distance: float, filter_change: bool) -> float:
+        """Time between exposures from the telescope profile: max(visit_overhead, slew_time(d)).
+
+        Parameters
+        ----------
+        distance : float
+            On-sky slew distance in radians.
+        filter_change : bool
+            Whether the filter changes between the two exposures.
+
+        Returns
+        -------
+        float
+            Dead time in seconds.
+        """
+        return float(self._telescope.parameters.dead_time(distance / units.deg, filter_change))
 
     def _get_exposure_time(self, field_id=None, filter_idx=None):
         """Per-(field, filter) exposure time from the lookups matrix.
@@ -602,24 +633,55 @@ class BaseBlancoEnv(gym.Env, ABC):
             self.lookups.fidfilt_exptime[int(field_id), int(filter_idx)]
         )
 
-    def _get_rewards(self, last_field, next_field):
-        '''
-        Calculates the reward for a single state transition.
+    def _needs_seeing_model(self) -> bool:
+        """Whether the fwhm feature or the teff reward term requires a seeing model."""
+        uses_teff = self._reward_cfg is not None and RewardTerm.TEFF in self._reward_cfg.terms
+        return "fwhm" in self.global_feature_names or uses_teff
 
-        Uses self._reward_func() if available, otherwise returns 1.
-
-        Args
-        ----
-            last_field (int): Field ID before taking the action.
-            next_field (int): Field ID after taking the action.
+    def _get_rewards(self) -> float:
+        """Reward for the last step, from the dataset's reward terms and the training reward stats.
 
         Returns
         -------
-            float: The calculated reward value.
-        '''
-        if getattr(self, "_reward_func", None) is None:
-            return 1.0
-        return self._reward_func(last_field, next_field)
+        float
+            Normalized reward; 0.0 without a reward config or when the step took no exposure (WAIT).
+        """
+        if self._reward_cfg is None or self._step_record is None:
+            return 0.0
+        R_tot = combine_rewards(self._reward_cfg, self._reward_term_inputs())
+        return float(normalize_rewards(self._reward_cfg, R_tot, self._norm_stats.reward)[0])
+
+    def _reward_term_inputs(self) -> dict:
+        """Per reward term, a callable returning its keyword arguments for the last step."""
+        s = self._step_record
+        params = self._telescope.parameters
+        return {
+            RewardTerm.EXPERT: lambda: dict(n_transitions=1),
+            RewardTerm.TEFF: lambda: dict(teff=np.array([self._predict_teff(s)])),
+            RewardTerm.SLEW: lambda: dict(excess_times=np.array(
+                [s['dead_time'] - params.visit_overhead(s['filter_change'])])),
+        }
+
+    def _predict_teff(self, s: dict) -> float:
+        """Model teff at exposure start, with the env's seeing model for the delivered FWHM.
+
+        Parameters
+        ----------
+        s : dict
+            Step record with field_id, filter_idx, and t_start (Unix seconds).
+
+        Returns
+        -------
+        float
+            Predicted effective exposure time factor tau.
+        """
+        if self._seeing_model is None:
+            raise ValueError("teff reward requires a seeing model in the environment.")
+        band = IDX2FILTER[s['filter_idx']]
+        ra, dec = self._ra_arr[s['field_id']], self._dec_arr[s['field_id']]
+        _, el = ephemerides.equatorial_to_topographic(ra=ra, dec=dec, time=s['t_start'])
+        fwhm = self._seeing_model.fwhm(s['t_start'], band=band, el=el) * units.arcsec
+        return float(predict_teff(time=s['t_start'], ra=ra, dec=dec, band=band, el=el, fwhm=fwhm))
 
     def _calculate_global_features(self) -> list:
         """Compute the global feature vector for the current state.

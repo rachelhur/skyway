@@ -47,8 +47,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
         cfg,
         constraints_cfg,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats,
         telemetry_init,
         survey_night_idx=0,
         telescope=None,
@@ -65,8 +64,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
             cfg=cfg,
             constraints_cfg=constraints_cfg,
             lookups=lookups,
-            z_score_stats=z_score_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=norm_stats,
             telescope=telescope,
         )
         self._build_priority_mask()
@@ -77,7 +75,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
         # Rolling seeing predictor, fed by real telemetry readings on each
         # sync. Built before the first sync below so telemetry_init can seed
         # it. Cold start falls back to the nominal median in Seeing.predict.
-        if "fwhm" in self.global_feature_names:
+        if self._needs_seeing_model():
             if seeing_window:
                 cfg.data.seeing.window = seeing_window
             self._seeing_model = PredictiveSeeingModel(cfg.data.seeing)
@@ -355,11 +353,19 @@ class LiveBlancoEnv(BaseBlancoEnv):
             logger.info(f"Waited {(self._ts - old_ts) / 60:.1f} minutes")
             # Field/filter unchanged on wait; only bin_num updates below.
             # No visit accumulation — a wait is not an observation.
+            self._step_record = None
         else:
-            last_field_id = self._field_id
+            last_field_id, last_filter_idx = self._field_id, self._filter_idx
+            distance = self._slew_distance(last_field_id, field_id)
+            filter_change = last_filter_idx != ZENITH_FILTER_IDX and last_filter_idx != filter_idx
+            dead_time = self._get_dead_time(distance, filter_change)
             exptime = self._get_exposure_time(field_id=field_id, filter_idx=filter_idx)
-            slew_time = self._get_slew_time(last_field_id, field_id)
-            self._ts += exptime + slew_time
+
+            self._step_record = dict(
+                field_id=field_id, filter_idx=filter_idx, t_start=self._ts + dead_time,
+                dead_time=dead_time, filter_change=filter_change,
+            )
+            self._ts += dead_time + exptime
 
             # _record_visit lives on BaseBlancoEnv and translates the
             # action's filter_idx to None automatically when the tracker

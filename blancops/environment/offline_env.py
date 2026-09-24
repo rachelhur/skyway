@@ -36,13 +36,15 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         cfg,
         constraints_cfg,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats,
         observing_night_strs: list[str],
         initial_counts: Optional[np.ndarray] = None,
         initial_last_visit_ot: Optional[np.ndarray] = None,
         initial_ot_at_sunset: float = 0.0,
         initial_fwhm: Optional[float] = None,
+        start_time: Optional[float] = None,
+        stop_time: Optional[float] = None,
+        downtime_windows=None,
         seeing_trajectory=None,
         field_mask_schedule=None,
         telescope=None,
@@ -58,8 +60,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
             cfg=cfg,
             constraints_cfg=constraints_cfg,
             lookups=lookups,
-            z_score_stats=z_score_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=norm_stats,
             telescope=telescope,
             max_nights=len(self._night_info),
         )
@@ -84,7 +85,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
                 )
             # Empty predictor so feature validation passes; _start_new_night
             # repopulates it per night, re-aligned to that night's sunset.
-            if "fwhm" in self.global_feature_names:
+            if self._needs_seeing_model():
                 self._seeing_model = PredictiveSeeingModel(self.cfg.data.seeing)
         elif initial_fwhm is not None:
             self._seeing_model = ConstantSeeingModel(
@@ -95,9 +96,9 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         # is re-entered for a night that's already been started.
         self._night_cfg_cache: dict[int, dict] = {}
 
-        if "fwhm" in self.global_feature_names and self._seeing_model is None:
+        if self._needs_seeing_model() and self._seeing_model is None:
             raise ValueError(
-                "OfflineBlancoEnv: 'fwhm' is a configured global feature but "
+                "OfflineBlancoEnv: the 'fwhm' feature or the teff reward needs seeing, but "
                 "no seeing source was given. Pass initial_fwhm (assumed zenith "
                 "seeing, arcsec) for a constant model, or seeing_trajectory to "
                 "replay a measured night, so the sim can project seeing per "
@@ -145,7 +146,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
 
     def _start_new_night(self) -> None:
         super()._start_new_night()
-        if self._seeing_trajectory is not None and "fwhm" in self.global_feature_names:
+        if self._seeing_trajectory is not None and self._needs_seeing_model():
             self._rebuild_seeing_model_from_trajectory()
 
     def _rebuild_seeing_model_from_trajectory(self) -> None:

@@ -23,6 +23,7 @@ from blancops.configs.enums import Algorithm, CheckpointMetric
 
 import argparse
 import gc
+import json
 import logging
 logger = logging.getLogger(__name__)
 
@@ -129,11 +130,14 @@ def main():
 
     # --- CONSTRUCT TRAIN DATASET --- #
     train_dataset = TransitionDataset(
-        mode='train',
         cache=cache,
         cfg=cfg,
         lookups=train_lookups,
     )
+    norm_stats = train_dataset.norm_stats
+    norm_stats_path = outdir / "checkpoints" / "normalization_stats.json"
+    norm_stats_path.write_text(json.dumps(norm_stats.to_dict(), indent=4))
+    logger.info(f"Normalization stats saved to {norm_stats_path}")
     logger.info(
         f"Train dataset: {train_dataset.n_nights} nights, "
         f"{train_dataset.num_transitions} transitions"
@@ -144,7 +148,6 @@ def main():
     night_split = train_dataset.night_split
     night_split.save(outdir / "configs" / "split.json")
 
-    norm_stats = train_dataset.get_norm_stats()
     for split in ('val', 'test'):
         split_nights = night_split.nights_for(split)
         if not split_nights:
@@ -152,12 +155,10 @@ def main():
             continue
         split_raw_cache = cache.filter_nights(split_nights, label=split.capitalize())
         split_dataset = TransitionDataset(
-            mode='test',
             cache=split_raw_cache,
             cfg=cfg,
             lookups=train_lookups,
-            z_score_stats=norm_stats['z_score'],
-            rel_norm_stats=norm_stats['rel_norm'],
+            norm_stats=norm_stats,
             split_role=split,
         )
         split_cache_path = dataset_cache_path(outdir, split)
@@ -232,7 +233,7 @@ def main():
         batch_size=cfg.train.batch_size,
         patience=cfg.train.patience,
         hpGrid=train_dataset.hpGrid,
-        norm_stats=train_dataset.get_norm_stats(),
+        norm_stats=norm_stats.to_dict(),
     )
     end_time = time.time()
     logger.info(f"Total train time = {end_time - start_time:.1f}s on {device}")

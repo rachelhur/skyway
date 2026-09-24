@@ -16,6 +16,7 @@ from blancops.configs.constants import FILTER2IDX, IDX2FILTER, DES_DATA_DIR
 from blancops.data.dataset import TransitionDataset
 from blancops.data.features.normalizations import StateNormalizer, inverse_cyclical_norm
 from blancops.data.lookup_tables import LookupTables
+from blancops.data.norm_stats import NormStats
 from blancops.ephemerides import ephemerides
 from blancops.math import units
 from blancops.math.geometry import angular_separation
@@ -354,13 +355,12 @@ class SingleStepDataContainer(DataContainer):
 class MultiStepDataContainer(DataContainer):
     """Expert vs agent across whole-episode rollouts from the offline runner."""
 
-    def __init__(self, val_dataset, action_space: str, lookups: LookupTables, z_score_stats: dict, rel_norm_stats: dict,
+    def __init__(self, val_dataset, action_space: str, lookups: LookupTables, norm_stats: NormStats,
                  global_normalizer: StateNormalizer):
         self.expert_valid_mask: np.ndarray = np.array([], dtype=bool)
         self.agent_valid_mask:  np.ndarray = np.array([], dtype=bool)
         self.agent_bin_feat_dict: dict = {}
-        self.z_score_stats = z_score_stats
-        self.rel_norm_stats = rel_norm_stats
+        self.norm_stats = norm_stats
         super().__init__(val_dataset, action_space, lookups, global_normalizer)
 
     def _populate_expert_df(self) -> None:
@@ -442,8 +442,7 @@ class MultiStepDataContainer(DataContainer):
         self.global_normalizer.inverse_transform_df(
             df,
             feature_names=glob_feats_carried,
-            z_stats_dict=self.z_score_stats['global_features'],
-            rel_stats_dict=self.rel_norm_stats['global_features'],
+            **self.norm_stats.normalizer_kwargs('global_features'),
         )
 
         self.agent_bin_feat_dict = bin_feat_dict

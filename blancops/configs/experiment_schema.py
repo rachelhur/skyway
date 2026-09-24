@@ -268,7 +268,7 @@ class RewardConfig(BaseModel):
     terms: dict[RewardTerm, float] = Field(
         default_factory=lambda: {RewardTerm.TEFF: 1.0}, min_length=1
     )
-    norm: str | None = 'minmax'
+    norm: Literal['minmax'] | None = 'minmax'  # keys of data.rewards.REWARD_NORMS
 
     @model_validator(mode="before")
     @classmethod

@@ -10,14 +10,11 @@ from blancops.math import units
 
 def build_env(cfg, norm_stats, lookups, telemetry_now):
     constraints_cfg = ActionConstraints()
-    zscore_stats = norm_stats.get('z_score', {})
-    rel_norm_stats = norm_stats.get('rel_norm', {})
     env = LiveBlancoEnv(
         cfg=cfg,
         constraints_cfg=constraints_cfg,
         lookups=lookups,
-        z_score_stats=zscore_stats,
-        rel_norm_stats=rel_norm_stats,
+        norm_stats=norm_stats,
         telemetry_init=telemetry_now
     )
     return env

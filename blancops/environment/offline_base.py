@@ -14,7 +14,7 @@ from abc import abstractmethod
 import numpy as np
 
 from blancops.environment.base import BaseBlancoEnv, StateSnapshot
-from blancops.configs.constants import WAIT_SIGNAL
+from blancops.configs.constants import WAIT_SIGNAL, ZENITH_FILTER_IDX
 from blancops.ephemerides import ephemerides
 
 import logging
@@ -75,11 +75,19 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
         if bin_num == WAIT_SIGNAL:
             logger.debug("Offline env received WAIT_SIGNAL; advancing minimal exptime.")
             self._ts = min(self._ts + 90.0, self._night_end_ts)
+            self._step_record = None
         else:
-            last_field_id = self._field_id
+            last_field_id, last_filter_idx = self._field_id, self._filter_idx
+            distance = self._slew_distance(last_field_id, field_id)
+            filter_change = last_filter_idx != ZENITH_FILTER_IDX and last_filter_idx != filter_idx
+            dead_time = self._get_dead_time(distance, filter_change)
             exptime = float(self._get_exposure_time(field_id=field_id, filter_idx=filter_idx))
-            slew_time = float(self._get_slew_time(last_field_id, field_id))
-            self._ts += exptime + slew_time
+
+            self._step_record = dict(
+                field_id=field_id, filter_idx=filter_idx, t_start=self._ts + dead_time,
+                dead_time=dead_time, filter_change=filter_change,
+            )
+            self._ts += dead_time + exptime
             self._ts = self._skip_downtime(self._ts)
 
             # _record_visit() lives on BaseBlancoEnv, and translates the action's filter_idx

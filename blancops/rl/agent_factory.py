@@ -8,6 +8,7 @@ from pathlib import Path
 from blancops.configs.constants import WORKSPACE
 from blancops.configs.enums import Algorithm
 from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate
+from blancops.data.norm_stats import NormStats
 from blancops.rl.registry import _build_bc_policy, _build_q_adapter, build_network
 from blancops.rl.agent import Agent
 from blancops.rl.checkpointer import resolve_weights_path
@@ -36,7 +37,7 @@ class AgentFactory:
         device: str = 'cpu',
         weights_filename: str = None, # Now defaults to None for auto-detection
         action_decode: str = 'joint'
-    ) -> Tuple[Agent, ExperimentConfig, dict]:
+    ) -> Tuple[Agent, ExperimentConfig, NormStats | None]:
 
         # If model_path_or_alias is an absolute path or a path that exists, prefer that
         if isinstance(model_path_or_alias, str) and Path(model_path_or_alias).is_absolute() and Path(model_path_or_alias).exists():
@@ -78,7 +79,7 @@ class AgentFactory:
         return resolve_weights_path(model_dir, filename)
 
     @staticmethod
-    def load_policy(weights_path: Path, cfg: ExperimentConfig, device: str) -> Tuple[torch.nn.Module, dict]:
+    def load_policy(weights_path: Path, cfg: ExperimentConfig, device: str) -> Tuple[torch.nn.Module, NormStats | None]:
         core_net = build_network(cfg)
 
         if cfg.model.algorithm == Algorithm.BC:
@@ -101,11 +102,11 @@ class AgentFactory:
                 if key in checkpoint:
                     state_dict = checkpoint[key]
                     break
-            norm_stats = checkpoint.get('norm_stats', {})
+            norm_stats = NormStats.from_dict(checkpoint['norm_stats']) if checkpoint.get('norm_stats') else None
         else:
             # Raw state dict.
             state_dict = checkpoint
-            norm_stats = {}
+            norm_stats = None
 
         AgentFactory._load_state_dict_tolerant(policy, state_dict, weights_path)
 

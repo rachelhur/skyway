@@ -5,6 +5,7 @@ multi-night forward-simulation ``OfflineBlancoEnv``, and runs the policy to
 generate an observing schedule. The first night's survey state can be seeded
 from a prior observing history via ``--obs_history_filename``.
 """
+import pandas as pd
 import numpy as np
 import gymnasium as gym
 
@@ -161,8 +162,6 @@ def main():
 
     # norm_stats come from the exact weights file loaded for the policy
     # (returned by build_agent), so normalization always matches the policy.
-    zscore_stats = norm_stats.get('z_score', {})
-    rel_norm_stats = norm_stats.get('rel_norm', {})
 
     # Seed the first night's survey state, either from a prior observing
     # history or from a cold start (no prior visits, OT clock at 0).
@@ -212,8 +211,7 @@ def main():
         constraints_cfg=ActionConstraints(sun_el_limit=args.sun_el_limit,
                                           airmass_limit=args.airmass_limit),
         lookups=lookups,
-        z_score_stats=zscore_stats,
-        rel_norm_stats=rel_norm_stats,
+        norm_stats=norm_stats,
         observing_night_strs=args.observing_nights,
         initial_counts=initial_counts,
         initial_last_visit_ot=initial_last_visit_ot,

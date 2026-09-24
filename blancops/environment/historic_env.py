@@ -33,8 +33,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         cfg,
         constraints_cfg,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats,
         global_pd_nightgroup,
         night_start_bin_states: Optional[np.ndarray] = None,
         telescope=None,
@@ -43,8 +42,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             cfg=cfg,
             constraints_cfg=constraints_cfg,
             lookups=lookups,
-            z_score_stats=z_score_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=norm_stats,
             telescope=telescope,
             max_nights=global_pd_nightgroup.ngroups,
         )
@@ -58,7 +56,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         # Seeing predictor. A model is required at construction so feature
         # validation passes; _start_new_night rebuilds it from each night's
         # measurements. Empty until then (predict falls back to nominal).
-        if "fwhm" in self.global_feature_names:
+        if self._needs_seeing_model():
             self._seeing_model = PredictiveSeeingModel(self.cfg.data.seeing)
 
         # Guard rails: features that need full-survey context cannot be
@@ -183,11 +181,11 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         and the agent's pointing (band/el) is honored per query via the base
         _get_fwhm delegate.
 
-        No-op when the config does not request the fwhm feature: leaving
+        No-op when neither the fwhm feature nor the teff reward needs it: leaving
         `_seeing_model` as None keeps `_get_fwhm` a no-op and avoids the
         predictor's empty-history fallback warning.
         """
-        if "fwhm" not in self.global_feature_names:
+        if not self._needs_seeing_model():
             return
         night_key = self._night_keys[self._night_idx]
         night_df = self._groupbynight.get_group(night_key)

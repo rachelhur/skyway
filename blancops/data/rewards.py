@@ -67,27 +67,82 @@ REWARD_TERMS: dict[RewardTerm, Callable[..., np.ndarray]] = {
 }
 
 
-def construct_rewards(cfg: RewardConfig, term_inputs: dict[RewardTerm, Callable[[], dict]]) -> np.ndarray:
-    """Weighted sum of the configured terms, R = sum_k w_k * R_k, then normalized.
+def combine_rewards(cfg: RewardConfig, term_inputs: dict[RewardTerm, Callable[[], dict]]) -> np.ndarray:
+    """Weighted sum of the configured terms, R = sum_k w_k * R_k (unnormalized).
 
     Parameters
     ----------
     cfg : RewardConfig
-        Reward terms, weights, and normalization.
+        Reward terms and weights.
     term_inputs : dict[RewardTerm, Callable[[], dict]]
         Per term, a callable returning that term's keyword arguments.
 
     Returns
     -------
     np.ndarray
-        Reward per transition, float32, shape (n_transitions,).
+        Unnormalized reward per transition, float32, shape (n_transitions,).
     """
     R_tot = sum(w * REWARD_TERMS[term](**term_inputs[term]()) for term, w in cfg.terms.items())
-    if cfg.norm == 'minmax':
-        R_tot = _minmax(R_tot)
     return np.asarray(R_tot, dtype=np.float32)
 
 
-def _minmax(x: np.ndarray) -> np.ndarray:
-    x_min, x_max = x.min(), x.max()
-    return (x - x_min) / (x_max - x_min) if x_max > x_min else x
+# -------------------------------------------------------------- #
+# -------------------- REWARD NORMS ---------------------------- #
+# -------------------------------------------------------------- #
+
+def _minmax_fit(R_tot: np.ndarray) -> dict:
+    return {'min': float(R_tot.min()), 'max': float(R_tot.max())}
+
+
+def _minmax_apply(R_tot: np.ndarray, stats: dict) -> np.ndarray:
+    span = stats['max'] - stats['min']
+    return (R_tot - stats['min']) / span if span > 0 else R_tot
+
+
+REWARD_NORMS: dict[str, tuple[Callable, Callable]] = {
+    'minmax': (_minmax_fit, _minmax_apply),
+}
+
+
+def reward_norm_stats(cfg: RewardConfig, R_tot: np.ndarray) -> dict | None:
+    """Fit reward normalization stats.
+
+    Parameters
+    ----------
+    cfg : RewardConfig
+        Reward configuration; cfg.norm selects the normalization.
+    R_tot : np.ndarray
+        Unnormalized training rewards, shape (n_transitions,).
+
+    Returns
+    -------
+    dict or None
+        Fitted stats (for minmax: {'min', 'max'}); None when cfg.norm is None.
+    """
+    return None if cfg.norm is None else REWARD_NORMS[cfg.norm][0](R_tot)
+
+
+def normalize_rewards(cfg: RewardConfig, R_tot: np.ndarray, stats: dict | None) -> np.ndarray:
+    """Apply reward normalization.
+
+    For minmax: R' = (R - min) / (max - min), identity when max == min.
+
+    Parameters
+    ----------
+    cfg : RewardConfig
+        Reward configuration; cfg.norm selects the normalization.
+    R_tot : np.ndarray
+        Unnormalized rewards.
+    stats : dict or None
+        Stats from reward_norm_stats on the training set; required unless cfg.norm is None.
+
+    Returns
+    -------
+    np.ndarray
+        Normalized rewards, float32, same shape as R_tot.
+    """
+    if cfg.norm is None:
+        return R_tot
+    if stats is None:
+        raise ValueError(f"reward.norm == '{cfg.norm}' requires stats fitted on the training set.")
+    return np.asarray(REWARD_NORMS[cfg.norm][1](R_tot, stats), dtype=np.float32)
