@@ -168,6 +168,16 @@ class TrainDataConfig(BaseDataConfig):
     test_frac: Optional[float] = None
     train_val_split: float = 0.9  # deprecated; feeds val_frac when val_frac is None
 
+    @field_validator('start_date', 'end_date', 'val_nights', 'test_nights', mode='before')
+    @classmethod
+    def dates_to_iso_strings(cls, v):
+        """Convert YAML-parsed dates (unquoted YYYY-MM-DD) to 'YYYY-MM-DD' strings."""
+        if isinstance(v, datetime.date):
+            return v.isoformat()[:10]
+        if isinstance(v, list):
+            return [d.isoformat()[:10] if isinstance(d, datetime.date) else d for d in v]
+        return v
+
     @field_validator('train_val_split')
     @classmethod
     def validate_train_val_split(cls, v):
