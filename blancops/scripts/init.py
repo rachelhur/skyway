@@ -12,12 +12,13 @@ logger = logging.getLogger(__name__)
 def main():
     """
     Initialize a blancops workspace and save a pointer to ~/.blancops_profile. Defaults to the active workspace ($BLANCOPS_WORKSPACE, else the current pointer, else ~/.blancops).
+    
     """
     parser = argparse.ArgumentParser(description="Initialize blancops workspace and saves a pointer to ~/.blancops_profile")
     parser.add_argument(
         '--workspace',
         '-w',
-        type=Path, 
+        type=Path,
         default=get_workspace_dir(),
         help="Target directory to initialize the workspace. Defaults to the active workspace."
     )
@@ -26,7 +27,7 @@ def main():
         action='store_true',
         help="Overwrite existing configuration files if they already exist."
     )
-    
+
     args = parser.parse_args()
     workspace = args.workspace.resolve()
 
@@ -34,7 +35,7 @@ def main():
 
     # Create the necessary directory structure
     directories_to_create = WorkspacePaths(workspace).init_dirs
-    
+
     for dir_path in directories_to_create:
         dir_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"  [+] Created directory: {dir_path}")
