@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 from blancops.io.logger_utils import configure_logger
 from blancops.rl.evaluations.evaluator import build_evaluators, plot_metric_distributions_with_ss_overlay
 from blancops.configs.experiment_schema import load_and_validate
+from blancops.configs.paths import RunPaths
 import logging
 
 from blancops.utils.sys_utils import get_system_device
@@ -42,14 +43,9 @@ def main():
 
     # Resolve the model dir from where the config was loaded (machine-portable).
     suffix = '_filter_first' if args.action_decoding == 'filter_first' else ''
-    base_subdir = 'holdout_eval' if args.split == 'val' else f'{args.split}_eval'
-    eval_subdir = f'{base_subdir}{suffix}'
-    if cfg.orig_cfg_path:
-        cfg_dir = Path(cfg.orig_cfg_path).parent
-        base = cfg_dir.parent if cfg_dir.name == "configs" else cfg_dir
-    else:
-        base = Path(cfg.outdir)
-    outdir = base / eval_subdir
+    base_eval_dir = RunPaths.from_config(cfg).eval_dir(args.split)
+    eval_subdir = f'{base_eval_dir.name}{suffix}'
+    outdir = base_eval_dir.with_name(eval_subdir)
 
     # ------------------------------
     # Initialize logger

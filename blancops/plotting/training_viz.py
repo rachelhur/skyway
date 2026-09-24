@@ -1,5 +1,7 @@
 import numpy as np
 import pickle
+
+from blancops.configs.paths import RunPaths
 from blancops.math import geometry
 from blancops.math import units
 import logging
@@ -8,9 +10,10 @@ logger = logging.getLogger(__name__)
 import matplotlib.pyplot as plt
 
 def plot_train_metrics(results_outdir, dataset):
-    with open(results_outdir / 'metrics' / 'train_metrics.pkl', 'rb') as f:
+    run_paths = RunPaths(results_outdir)
+    with open(run_paths.train_metrics, 'rb') as f:
         train_metrics = pickle.load(f)
-    with open(results_outdir / 'metrics' / 'val_metrics.pkl', 'rb') as f:
+    with open(run_paths.val_metrics, 'rb') as f:
         val_metrics = pickle.load(f)
     
     # Plot Loss, Accuracy, and Angular separation
@@ -59,7 +62,7 @@ def plot_train_metrics(results_outdir, dataset):
         ax.grid(True, alpha=.5)
 
     fig.tight_layout()
-    fig.savefig(results_outdir / 'figures' / 'loss_and_metrics_history.png')    
+    fig.savefig(run_paths.figures / 'loss_and_metrics_history.png')    
     
     if 'unique_bins' in val_metrics:
         # Count bins with < 10 examples
@@ -73,7 +76,7 @@ def plot_train_metrics(results_outdir, dataset):
         ax.hlines(y=total_bin_diversity, xmin=0, xmax=np.max(train_metrics['epoch']), label='dataset-wide unique bin visit', color='black', linestyle='dotted')
         ax.legend(fontsize=12)
         fig.tight_layout()
-        fig.savefig(results_outdir / 'figures' / 'unique_bins_history.png')
+        fig.savefig(run_paths.figures / 'unique_bins_history.png')
 
     if 'lr' in train_metrics.keys():       
         fig, ax = plt.subplots()
@@ -82,7 +85,7 @@ def plot_train_metrics(results_outdir, dataset):
         ax.set_xlabel('Epoch', fontsize=14)
         ax.set_ylabel('LR', fontsize=14)
         fig.tight_layout()
-        fig.savefig(results_outdir / 'figures' / 'lr_steps.png')
+        fig.savefig(run_paths.figures / 'lr_steps.png')
 
     # OTHER METRICS
     metrics_ya_plotted = ['accuracy', 'ang_sep', 'loss', 'unique', 'lr', 'unique']
@@ -97,7 +100,7 @@ def plot_train_metrics(results_outdir, dataset):
     ax.legend()
     ax.set_xlabel('Epoch', fontsize=14)
     fig.tight_layout()
-    fig.savefig(results_outdir / 'figures' / 'val_metrics.png')
+    fig.savefig(run_paths.figures / 'val_metrics.png')
     
 def plot_bin_membership(dataset, fig_outdir):
     # Plot bin membership for fields in ra vs dec

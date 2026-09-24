@@ -1,44 +1,8 @@
 from collections import OrderedDict
 from enum import IntEnum
-import os
-from pathlib import Path
 from typing import Dict, List, Literal
 
 import numpy as np
-
-"""
-Directories and Paths
-"""
-
-def get_workspace_dir() -> Path:
-    """Determines the active workspace. Priority: (1) environment variable (2) pointer file (saved after running model-init) (3) default=`~/.blancops`
-    """
-    env_workspace = os.getenv("BLANCOPS_WORKSPACE")
-    if env_workspace:
-        return Path(env_workspace).resolve()
-
-    pointer_file = Path.home() / ".blancops_profile"
-    if pointer_file.exists():
-        saved_path = pointer_file.read_text().strip()
-        if saved_path:
-            return Path(saved_path).resolve()
-
-    # 3. Fallback to default
-    return Path.home() / ".blancops"
-
-WORKSPACE = get_workspace_dir()
-
-PATHS = {
-    "TRAIN_DIR": Path(WORKSPACE / "data" / "train"),
-    "DES_DATA_DIR": Path(WORKSPACE / "data" / "train" / "des"),
-    "HEALPIX_GRID": Path(WORKSPACE / "data" / "test_suite" / "healpix-grid"),
-    "MAGIC_SPRING": Path(WORKSPACE / "data" / "test_suite" / "magic-spring"),
-    "SAMPLE_110825": Path(WORKSPACE / "data" / "test_suite" / "sample-110825")
-}
-
-DES_DATA_DIR = PATHS["DES_DATA_DIR"]
-DES_FITS_PATH = DES_DATA_DIR / "fits" / "decam-exposures-20251211.fits"
-
 
 """
 Feature names

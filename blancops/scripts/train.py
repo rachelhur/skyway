@@ -9,7 +9,7 @@ from blancops.rl.trainer import Trainer
 from blancops.utils.sys_utils import get_system_device, seed_everything
 from blancops.io.logger_utils import configure_logger
 from blancops.data.dataset import TransitionDataset, OfflineDataset
-from blancops.data.feature_cache import RawFeatureCache, DatasetCache, dataset_cache_path
+from blancops.data.feature_cache import RawFeatureCache, DatasetCache
 from blancops.data.splits import resolve_night_split
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.plotting.training_viz import (
@@ -18,7 +18,7 @@ from blancops.plotting.training_viz import (
 )
 from blancops.rl.registry import build_algorithm
 from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate, resolve_and_save
-from blancops.configs.constants import DES_DATA_DIR, WORKSPACE
+from blancops.configs.paths import RunPaths, feature_cache_dir, lookups_dir, workspace
 from blancops.configs.enums import Algorithm, CheckpointMetric
 
 import argparse
@@ -34,7 +34,7 @@ def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-c', '--cfg', type=str, default=None, required=True,
                         help="Path to config file.")
-    parser.add_argument('--data_dir', type=str, default=str(DES_DATA_DIR),
+    parser.add_argument('--data_dir', type=str, default=str(workspace().des_data),
                         help="Data directory containing lookups/ and the feature cache.")
     parser.add_argument('-l', '--logging_level', type=str, default='info',
                         help='Logging level.')
@@ -51,41 +51,25 @@ def get_args():
     return parser.parse_args()
 
 
-def setup_result_outdirs(cfg: ExperimentConfig):
-    parent = Path(cfg.parent_dir)
-    if not parent.is_absolute():
-        parent = WORKSPACE / parent
-
-    if cfg.outdir:
-        outdir = Path(cfg.outdir)
-        if not outdir.is_absolute():
-            outdir = WORKSPACE / outdir
-    else:
-        outdir = parent / cfg.experiment_name
-
-    outdir.mkdir(parents=True, exist_ok=True)
-    for subdir in ('figures', 'checkpoints', 'metrics', 'configs', 'logs'):
-        (outdir / subdir).mkdir(parents=True, exist_ok=True)
-
-    cfg.outdir = str(outdir)
-    return outdir
-
-
-def _cache_dir(data_dir: Path, nside: int, is_azel: bool) -> Path:
-    coord = 'azel' if is_azel else 'radec'
-    return data_dir / f"feature_cache_nside{nside}_{coord}"
+def setup_result_outdirs(cfg: ExperimentConfig) -> RunPaths:
+    """Create the run directory (a relative cfg.outdir is resolved against the workspace)."""
+    run_paths = RunPaths(workspace().root / cfg.outdir)
+    run_paths.make_dirs()
+    cfg.outdir = str(run_paths.root)
+    return run_paths
 
 
 def main():
     args = get_args()
     cfg = load_and_validate(args.cfg)
-    outdir = setup_result_outdirs(cfg)
+    run_paths = setup_result_outdirs(cfg)
+    outdir = run_paths.root
 
     logger = configure_logger(
         level=args.logging_level,
         log_to_stdout=True,
         log_to_file=True,
-        outdir=outdir / "logs",
+        outdir=run_paths.logs,
         filename="train.log",
         use_tqdm=True,
     )
@@ -96,7 +80,7 @@ def main():
     # --- LOAD FEATURE CACHE --- #
     data_dir = Path(args.data_dir)
     is_azel = 'azel' in cfg.data.action_space
-    cache_dir = _cache_dir(data_dir, cfg.data.nside, is_azel)
+    cache_dir = feature_cache_dir(data_dir, cfg.data.nside, is_azel)
 
     if not RawFeatureCache.exists(cache_dir):
         raise FileNotFoundError(
@@ -116,7 +100,7 @@ def main():
             test_nights=cfg.data.test_nights,
             test_frac=cfg.data.test_frac,
         )
-        night_split.save(outdir / "configs" / "split.json")
+        night_split.save(run_paths.split_json)
         logger.info(f"Dry run split: {night_split.counts}")
         return
 
@@ -126,7 +110,7 @@ def main():
         start_date=cfg.data.start_date,
         end_date=cfg.data.end_date,
     )
-    train_lookups = TrainLookupTables.load_from_dir(data_dir / "lookups")
+    train_lookups = TrainLookupTables.load_from_dir(lookups_dir(data_dir))
 
     # --- CONSTRUCT TRAIN DATASET --- #
     train_dataset = TransitionDataset(
@@ -135,7 +119,7 @@ def main():
         lookups=train_lookups,
     )
     norm_stats = train_dataset.norm_stats
-    norm_stats_path = outdir / "checkpoints" / "normalization_stats.json"
+    norm_stats_path = run_paths.norm_stats_json
     norm_stats_path.write_text(json.dumps(norm_stats.to_dict(), indent=4))
     logger.info(f"Normalization stats saved to {norm_stats_path}")
     logger.info(
@@ -146,7 +130,7 @@ def main():
 
     # --- BUILD SPLIT DATASET CACHES --- #
     night_split = train_dataset.night_split
-    night_split.save(outdir / "configs" / "split.json")
+    night_split.save(run_paths.split_json)
 
     for split in ('val', 'test'):
         split_nights = night_split.nights_for(split)
@@ -161,7 +145,7 @@ def main():
             norm_stats=norm_stats,
             split_role=split,
         )
-        split_cache_path = dataset_cache_path(outdir, split)
+        split_cache_path = run_paths.dataset_cache(split)
         DatasetCache.from_transition_dataset(split_dataset, split=split).save(split_cache_path)
         logger.info(f"{split} dataset cache saved to {split_cache_path}")
         del split_raw_cache, split_dataset
@@ -172,9 +156,9 @@ def main():
     logger.info("Released feature cache from memory.")
 
     # --- DEFAULT PLOTS --- #
-    plot_bin_membership(train_dataset, outdir / "figures")
-    plot_global_feature_distributions(train_dataset, outdir / "figures")
-    plot_bin_feature_distributions(train_dataset, outdir / "figures")
+    plot_bin_membership(train_dataset, run_paths.figures)
+    plot_global_feature_distributions(train_dataset, run_paths.figures)
+    plot_bin_feature_distributions(train_dataset, run_paths.figures)
 
     # --- DATALOADERS --- #
     offline_dataset = OfflineDataset(
@@ -203,10 +187,10 @@ def main():
         dataset_feature_names=train_dataset.dataset_feature_names,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
         night_split=night_split,
-        outdir=outdir / "configs",
+        outdir=run_paths.configs,
     )
     algorithm = build_algorithm(cfg, device=device)
-    latest_ckpt_path = outdir / "checkpoints" / "latest_checkpoint.pt"
+    latest_ckpt_path = run_paths.latest_checkpoint
 
     trainer = Trainer(
         algorithm=algorithm,

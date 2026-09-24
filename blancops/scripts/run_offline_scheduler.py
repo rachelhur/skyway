@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import gymnasium as gym
 
-from blancops.configs.constants import WORKSPACE
+from blancops.configs.paths import RunPaths, workspace
 from blancops.configs.experiment_schema import ActionConstraints
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.offline_runner import OfflineRunner
@@ -66,7 +66,7 @@ def get_args():
                              "median. Only used when the model includes 'fwhm' as a global feature, and "
                              "ignored when --seeing_val_night is given.")
     parser.add_argument('--val_seeing_cache', type=Path,
-                        default=WORKSPACE / 'deployable_models/bc_v1_max_feature_set/checkpoints/val_dataset_cache.pt',
+                        default=RunPaths(workspace().deployable_models / 'bc_v1_max_feature_set').dataset_cache('val'),
                         help="Path to a val_dataset_cache.pt holding the validation-night DataFrame, "
                              "used with --seeing_val_night to replay a real night's measured seeing.")
     parser.add_argument('--seeing_val_night', type=str, default=None,

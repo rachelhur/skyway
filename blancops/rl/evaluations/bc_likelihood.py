@@ -18,7 +18,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from blancops.configs.experiment_schema import load_and_validate
-from blancops.data.feature_cache import DatasetCache, dataset_cache_path
+from blancops.data.feature_cache import DatasetCache
+from blancops.configs.paths import RunPaths
 from blancops.rl.agent_factory import AgentFactory
 
 import logging
@@ -43,20 +44,20 @@ def evaluate_run(
 
     Returns the same dict as compute_bc_loglikelihood.
     """
-    run_dir = Path(run_dir)
+    run_paths = RunPaths(run_dir)
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    cfg = load_and_validate(run_dir / "configs" / "resolved_config.yaml")
+    cfg = load_and_validate(run_paths.resolved_config)
 
     policy, _ = AgentFactory.load_policy(
-        weights_path=run_dir / "checkpoints" / "model.pt",
+        weights_path=run_paths.model_pt,
         cfg=cfg,
         device=device,
     )
 
     loader = loader_from_cache(
-        dataset_cache_path(run_dir, split),
+        run_paths.dataset_cache(split),
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=pin_memory,

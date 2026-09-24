@@ -10,7 +10,7 @@ import re
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.math import units
 
-from blancops.configs.constants import DES_DATA_DIR, DES_FITS_PATH
+from blancops.configs.paths import workspace
 from blancops.configs.constants import FILTER2IDX
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.io.file_io import preprocess_fits
@@ -299,8 +299,8 @@ def _add_field_col(df):
 
 
 def build_DES_lookups(fits_path=None, outdir=None):
-    fits_path = Path(fits_path or DES_FITS_PATH).resolve()
-    outdir = Path(outdir or DES_DATA_DIR).resolve()
+    fits_path = Path(fits_path or workspace().des_fits).resolve()
+    outdir = Path(outdir or workspace().des_data).resolve()
 
     df = load_and_process_historic_data(fits_path=fits_path)
     if len(df) == 0: # Fixed the logical bug here: len(df) == 0 means no obs found

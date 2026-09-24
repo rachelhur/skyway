@@ -12,6 +12,8 @@ import pickle
 import random
 from pathlib import Path
 
+from blancops.configs.paths import RunPaths
+
 from blancops.configs.constants import *
 import logging
 
@@ -65,11 +67,12 @@ class Trainer:
         if not os.path.exists(train_outdir):
             os.makedirs(train_outdir)
         self.train_outdir = Path(train_outdir)
+        self.run_paths = RunPaths(self.train_outdir)
         self.overwrite = overwrite
         self.hard_overwrite = hard_overwrite
         self.ckpt_metric = ckpt_metric
         self.checkpointer = Checkpointer(
-            self.train_outdir / "checkpoints",
+            self.run_paths.checkpoints,
             top_k=top_k,
             mode=_CKPT_DIRECTION[ckpt_metric],
             overwrite=overwrite,
@@ -90,8 +93,8 @@ class Trainer:
 
         val_metrics = defaultdict(list)
         train_metrics = defaultdict(list)
-        train_metrics_filepath = self.train_outdir / 'metrics' / 'train_metrics.pkl'
-        val_metrics_filepath = self.train_outdir / 'metrics' / 'val_metrics.pkl'
+        train_metrics_filepath = self.run_paths.train_metrics
+        val_metrics_filepath = self.run_paths.val_metrics
 
         # --- Reload previous metric histories if resuming ---
         if start_epoch > 0:
@@ -319,8 +322,8 @@ class Trainer:
         # Set to train mode
         self.algorithm.policy.train()
         save_filepath = self.train_outdir / 'best_weights.pt'
-        train_metrics_filepath = self.train_outdir / 'metrics' / 'train_metrics.pkl'
-        val_metrics_filepath = self.train_outdir / 'metrics' / 'val_metrics.pkl'
+        train_metrics_filepath = self.run_paths.train_metrics
+        val_metrics_filepath = self.run_paths.val_metrics
 
         dataset_size = len(trainloader.dataset)
         steps_per_epoch = np.max([dataset_size // batch_size, 1])

@@ -27,7 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
-from blancops.data_quality.sky_brightness import _CONFIG_PATH, estimate_sky_brightness
+from blancops.configs.paths import DECAM_SKY_CONFIG
+from blancops.data_quality.sky_brightness import estimate_sky_brightness
 from blancops.ephemerides.ephemerides import equatorial_to_topographic
 from blancops.math import units
 
@@ -77,7 +78,7 @@ def _read_sky_config(key, config_path=None):
     Returns:
         dict of str to float: Parameter value keyed by band name.
     """
-    config_path = _CONFIG_PATH if config_path is None else Path(config_path)
+    config_path = DECAM_SKY_CONFIG if config_path is None else Path(config_path)
     config = ConfigParser()
     config.read(str(config_path))
 

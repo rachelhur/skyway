@@ -8,7 +8,8 @@ from typing import Any, List, Union, Literal, Dict
 import numpy as np
 from typing import Optional
 from blancops.configs.enums import *
-from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, DES_FITS_PATH, _BIN_FEATURES
+from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, _BIN_FEATURES
+from blancops.configs.paths import RunPaths, workspace
 from blancops.configs.constants import FILTER2IDX
 from blancops.configs.constants import _ALLOWED_NORMS_PER_FEATURE, _NORM_TYPES
 from blancops.survey.profiles import DES
@@ -93,7 +94,7 @@ class SeeingConfig(BaseModel):
 
 class BaseDataConfig(BaseModel):
     name: str = 'des-data-v0'
-    path: str = str(DES_FITS_PATH)
+    path: str = Field(default_factory=lambda: str(workspace().des_fits))
     # cache_in_memory: bool = False
 
     # Data configuration
@@ -500,14 +501,17 @@ class ExperimentConfig(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def set_outdir(cls, data: Any) -> Any:
-        """Intercepts the raw dictionary to compute outdir before validation."""
+        """Intercepts the raw dictionary to compute outdir before validation.
+
+        A relative parent_dir is resolved against the workspace; an absolute one is used as-is.
+        """
         if isinstance(data, dict) and data.get('outdir') is None:
             exp_name = data.get('experiment_name')
-            parent = data.get('parent_dir', 'experiments/')
+            parent = workspace().root / data.get('parent_dir', 'experiments/')
 
             if exp_name:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                data['outdir'] = str(Path(parent) / exp_name / f"run_{timestamp}")
+                data['outdir'] = str(parent / exp_name / f"run_{timestamp}")
                 # data['outdir'] = str(Path(parent) / exp_name)
 
         return data # Return the modified dictionary
@@ -571,8 +575,9 @@ def resolve_and_save(cfg: ExperimentConfig, dataset_dims: dict, dataset_feature_
     # CONSTRUCT EXPERIMENT_OUTDIR CONFIG FIELD AND SAVE RESOLVED CONFIG
     if resolved_cfg.outdir is None:
         resolved_cfg.outdir = str(Path(resolved_cfg.outdir))
-    Path(Path(resolved_cfg.outdir) / "configs" ).mkdir(parents=True, exist_ok=True)
-    with open(Path(resolved_cfg.outdir) / "configs" /"resolved_config.yaml", "w") as f:
+    run_paths = RunPaths(resolved_cfg.outdir)
+    run_paths.configs.mkdir(parents=True, exist_ok=True)
+    with open(run_paths.resolved_config, "w") as f:
         # Use mode='json' to force Pydantic to convert complex types (like Enums) to strings
         resolved_dict = resolved_cfg.model_dump(mode='json')
         # print('DUMPING RESOLVED CONFIG IN ', f)

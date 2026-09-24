@@ -16,7 +16,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from blancops.configs.constants import DES_DATA_DIR, DES_FITS_PATH
+from blancops.configs.paths import feature_cache_dir, lookups_dir, workspace
 from blancops.data.feature_cache import RawFeatureCache
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.data.preprocessing import load_and_process_historic_data
@@ -32,11 +32,11 @@ def get_args():
         description="Precompute all raw features from a FITS file and save to disk.",
     )
     parser.add_argument(
-        '--fits_path', type=str, default=str(DES_FITS_PATH),
+        '--fits_path', type=str, default=str(workspace().des_fits),
         help='Path to the FITS observations file.'
     )
     parser.add_argument(
-        '--data_dir', type=str, default=DES_DATA_DIR,
+        '--data_dir', type=str, default=workspace().des_data,
         help='Data directory containing lookups and output dir for feature cache.'
     )
     parser.add_argument(
@@ -67,9 +67,9 @@ def main():
     )
 
     fits_path = Path(args.fits_path)
-    lookups_dir = Path(args.data_dir) / "lookups"
-    outdir = Path(args.data_dir) / f"feature_cache_nside{args.nside}_{args.action_space_type}"
     is_azel = 'azel' in args.action_space_type
+    lookup_dir = lookups_dir(args.data_dir)
+    outdir = feature_cache_dir(args.data_dir, args.nside, is_azel)
 
     logger.info(f"Loading and processing historical data from {fits_path}")
     df = load_and_process_historic_data(fits_path=fits_path)
@@ -78,8 +78,8 @@ def main():
         logger.info("Running in test mode: using only the first 1000 rows of data.")
         df = df.head(1000)
 
-    logger.info(f"Loading lookup tables from {lookups_dir}")
-    lookups = TrainLookupTables.load_from_dir(lookups_dir)
+    logger.info(f"Loading lookup tables from {lookup_dir}")
+    lookups = TrainLookupTables.load_from_dir(lookup_dir)
 
     logger.info(f"Building HEALPix grid  nside={args.nside}  is_azel={is_azel}")
     hpGrid = ephemerides.HealpixGrid(nside=args.nside, is_azel=is_azel)

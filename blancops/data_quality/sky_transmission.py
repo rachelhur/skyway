@@ -1,6 +1,6 @@
 import numpy as np
 from pathlib import Path
-from blancops.data_quality.sky_brightness import _CONFIG_PATH
+from blancops.configs.paths import DECAM_SKY_CONFIG
 from blancops.math import units
 from configparser import ConfigParser
 
@@ -20,7 +20,7 @@ def estimate_transmission(el, band, config_path=None):
         Name of filter(s) ('u', 'g', 'r', 'i', 'z', or 'Y').
     config_path : str or Path, optional
         Path to the sky brightness configuration file. If not provided, uses the default
-        'decam_sky.conf' in this module's directory.
+        paths.DECAM_SKY_CONFIG (blancops/blanco/decam_sky.conf).
 
     Returns
     -------
@@ -32,7 +32,7 @@ def estimate_transmission(el, band, config_path=None):
 
     # parse config file containing extinction coefficients
     if config_path is None:
-        config_path = _CONFIG_PATH
+        config_path = DECAM_SKY_CONFIG
     else:
         config_path = Path(config_path)
     config = ConfigParser()
@@ -82,7 +82,7 @@ def convert_transmission(
         Original elevation of the measurements (in radians). Default is zenith.
     config_path : str or Path, optional
         Path to the sky brightness configuration file. If not provided, uses the default
-        'decam_sky.conf' in this module's directory.
+        paths.DECAM_SKY_CONFIG (blancops/blanco/decam_sky.conf).
 
     Returns
     -------
@@ -96,7 +96,7 @@ def convert_transmission(
 
     # parse config file containing extinction coefficients
     if config_path is None:
-        config_path = _CONFIG_PATH
+        config_path = DECAM_SKY_CONFIG
     else:
         config_path = Path(config_path)
     config = ConfigParser()

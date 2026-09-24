@@ -27,17 +27,13 @@ logger = logging.getLogger(__name__)
 
 from collections import defaultdict
 
-from blancops.configs.constants import (
-    FILTER2IDX,
-    DES_DATA_DIR,
-    DES_FITS_PATH,
-    _NUM_FILTERS,
-)
+from blancops.configs.constants import FILTER2IDX, _NUM_FILTERS
+from blancops.configs.paths import RunPaths, feature_cache_dir, lookups_dir, workspace
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
 from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
 from blancops.data.dataset import TransitionDataset
-from blancops.data.feature_cache import RawFeatureCache, DatasetCache, dataset_cache_path
+from blancops.data.feature_cache import RawFeatureCache, DatasetCache
 from blancops.data.norm_stats import NormStats
 from blancops.data.splits import NightSplit
 from blancops.data.features.normalizations import build_normalizer
@@ -90,8 +86,6 @@ def build_evaluators(
     Returns:
         The single-step and multi-step evaluators.
     """
-    if eval_outdir is None:
-        eval_outdir = 'holdout_eval' if split == 'val' else f'{split}_eval'
     cfg = (
         load_and_validate(cfg_or_cfg_path)
         if isinstance(cfg_or_cfg_path, str)
@@ -100,13 +94,11 @@ def build_evaluators(
     style = style or PlotStyle()
 
     # Resolve the model dir from where the config was loaded
-    if cfg.orig_cfg_path:
-        cfg_dir = Path(cfg.orig_cfg_path).parent
-        outdir = cfg_dir.parent if cfg_dir.name == "configs" else cfg_dir
-    else:
-        outdir = Path(cfg.outdir)
-    ss_outdir = outdir / eval_outdir / 'ss'
-    ms_outdir = outdir / eval_outdir / 'ms'
+    run_paths = RunPaths.from_config(cfg)
+    outdir = run_paths.root
+    eval_dir = run_paths.eval_dir(split) if eval_outdir is None else outdir / eval_outdir
+    ss_outdir = eval_dir / 'ss'
+    ms_outdir = eval_dir / 'ms'
 
     # Checkpoint + normalizers
     checkpoint = get_checkpoint(outdir, device=device)
@@ -115,22 +107,20 @@ def build_evaluators(
     telescope = get_telescope("blanco")
 
     # Load val dataset from cache or reconstruct from feature cache
-    lookups = TrainLookupTables.load_from_dir(DES_DATA_DIR / "lookups")
-    val_cache_path = dataset_cache_path(outdir, split)
-    _data_dir = Path(data_dir) if data_dir is not None else DES_DATA_DIR
-    is_azel = 'azel' in cfg.data.action_space
-    coord = 'azel' if is_azel else 'radec'
-    feature_cache_dir = _data_dir / f"feature_cache_nside{cfg.data.nside}_{coord}"
+    lookups = TrainLookupTables.load_from_dir(lookups_dir(workspace().des_data))
+    val_cache_path = run_paths.dataset_cache(split)
+    _data_dir = Path(data_dir) if data_dir is not None else workspace().des_data
+    cache_dir = feature_cache_dir(_data_dir, cfg.data.nside, is_azel='azel' in cfg.data.action_space)
 
     if DatasetCache.exists(val_cache_path):
         val_dataset = DatasetCache.load(val_cache_path)
     else:
-        if not RawFeatureCache.exists(feature_cache_dir):
+        if not RawFeatureCache.exists(cache_dir):
             raise FileNotFoundError(
                 f"Neither {split} dataset cache ({val_cache_path}) nor feature cache "
-                f"({feature_cache_dir}) found."
+                f"({cache_dir}) found."
             )
-        split_json = outdir / "configs" / "split.json"
+        split_json = run_paths.split_json
         if NightSplit.exists(split_json):
             split_nights = NightSplit.load(split_json).nights_for(split)
         else:
@@ -140,7 +130,7 @@ def build_evaluators(
                 f"No {split} nights found in {split_json} or in the config; "
                 f"cannot reconstruct the {split} dataset."
             )
-        full_cache = RawFeatureCache.load(feature_cache_dir, mmap_bin=True)
+        full_cache = RawFeatureCache.load(cache_dir, mmap_bin=True)
         val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
             cache=val_raw_cache, cfg=cfg, lookups=lookups,

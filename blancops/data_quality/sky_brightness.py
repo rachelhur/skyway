@@ -5,8 +5,7 @@ from astropy.time import Time
 import numpy as np
 from configparser import ConfigParser
 
-# Path to the default Blanco sky configuration file.
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "blanco" / "decam_sky.conf"
+from blancops.configs.paths import DECAM_SKY_CONFIG
 
 
 def estimate_sky_brightness(time, ra, dec, band, config_path=None):
@@ -36,7 +35,7 @@ def estimate_sky_brightness(time, ra, dec, band, config_path=None):
 
     # parse config file
     if config_path is None:
-        config_path = _CONFIG_PATH
+        config_path = DECAM_SKY_CONFIG
     else:
         config_path = Path(config_path)
     model_config = ConfigParser()

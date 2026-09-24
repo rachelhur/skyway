@@ -604,8 +604,3 @@ class DatasetCache:
 
 # Backwards-compatible alias for code and pickles predating the split rename
 ValDatasetCache = DatasetCache
-
-
-def dataset_cache_path(outdir, split: str = 'val') -> Path:
-    """Location of a split's DatasetCache: <outdir>/checkpoints/<split>_dataset_cache.pt"""
-    return Path(outdir) / "checkpoints" / f"{split}_dataset_cache.pt"

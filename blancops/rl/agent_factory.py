@@ -5,7 +5,7 @@ import yaml
 from pathlib import Path
 
 # Import your domain-specific modules
-from blancops.configs.constants import WORKSPACE
+from blancops.configs.paths import RunPaths, workspace
 from blancops.configs.enums import Algorithm
 from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate
 from blancops.data.norm_stats import NormStats
@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 from typing import Tuple
 
 class AgentFactory:
-    def __init__(self, base_model_dir: str = WORKSPACE / "deployable_models"):
+    def __init__(self, base_model_dir: str | Path | None = None):
         """Factory for building scheduling agents.
 
         Args:
-            base_model_dir (str, optional): _description_. Defaults to WORKSPACE / "deployable_models".
+            base_model_dir (str, optional): _description_. Defaults to workspace().deployable_models.
         """
-        self.base_dir = Path(base_model_dir)
+        self.base_dir = Path(base_model_dir) if base_model_dir is not None else workspace().deployable_models
         self.alias_file = self.base_dir / "aliases.yml"
         self.aliases = self._load_aliases()
 
@@ -47,9 +47,9 @@ class AgentFactory:
         else:
             model_dir = self.resolve_model_dir(model_path_or_alias)
 
-        config_path = model_dir / "resolved_config.yaml"
+        config_path = model_dir / RunPaths.RESOLVED_CONFIG
         if not config_path.exists():
-            config_path = model_dir / "configs" / "resolved_config.yaml"
+            config_path = RunPaths(model_dir).resolved_config
 
         if not config_path.exists():
             raise FileNotFoundError(

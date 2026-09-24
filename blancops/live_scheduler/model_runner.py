@@ -222,7 +222,7 @@ class AIModelRunner(ModelRunner):
 
     def _build_agent(self, model_path_or_alias, field_choice_method):
         # Agent and Model
-        factory = AgentFactory() # Defaults to WORKSPACE / "deployable_models"
+        factory = AgentFactory() # Defaults to workspace().deployable_models
         self.agent, self.cfg, self.norm_stats = factory.build_agent(
             model_path_or_alias=model_path_or_alias,
             lookups=self.lookups,

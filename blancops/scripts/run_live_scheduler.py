@@ -19,10 +19,9 @@ from blancops.ephemerides import time_utils
 
 # Use logging module -> stdout and/or file out instead of lieu statements
 from blancops.io.logger_utils import configure_logger
+from blancops.configs.paths import LIVE_SCHEDULER_DEFAULT_CONFIG
 
-DEFAULT_CONFIG_PATH = (
-    Path(__file__).resolve().parents[1] / "configs" / "live_scheduler_default.yaml"
-)
+DEFAULT_CONFIG_PATH = LIVE_SCHEDULER_DEFAULT_CONFIG
 
 def load_yaml_defaults(config_path):
     """Load scheduler defaults from a YAML config file."""

@@ -4,7 +4,7 @@ from pathlib import Path
 from blancops.data.preprocessing import build_DES_lookups
 from blancops.math import units
 
-from blancops.configs.constants import DES_DATA_DIR, DES_FITS_PATH
+from blancops.configs.paths import lookups_dir, workspace
 from blancops.configs.constants import FILTER2IDX
 import matplotlib.pyplot as plt
 import warnings
@@ -18,12 +18,12 @@ def main():
         description="Generate train-data lookup tables from raw DECam observations."
     )
     parser.add_argument(
-        "--fits_path", type=Path, default=DES_FITS_PATH,
+        "--fits_path", type=Path, default=workspace().des_fits,
         help="Path to the raw DECam exposures FITS file",
     )
     parser.add_argument(
-        "-o", "--out_parent_dir", type=Path, default=DES_DATA_DIR,
-        help="Directory to save the generated lookup tables. Defaults to WORKSPACE / 'data' / 'train' / 'des')",
+        "-o", "--out_parent_dir", type=Path, default=workspace().des_data,
+        help="Directory to save the generated lookup tables. Defaults to workspace().des_data)",
     )
     parser.add_argument(
         '-p', '--save_plots', action="store_true",
@@ -46,7 +46,7 @@ def main():
     # SETUP OUTDIR
     # --------------------------------------
     out_parent_dir = Path(args.out_parent_dir)
-    lookups_outdir = out_parent_dir / "lookups"
+    lookups_outdir = lookups_dir(out_parent_dir)
     figures_outdir = out_parent_dir / "figures"
     lookups_outdir.mkdir(parents=True, exist_ok=True)
     figures_outdir.mkdir(parents=True, exist_ok=True)
