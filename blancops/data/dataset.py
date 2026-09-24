@@ -17,7 +17,7 @@ from blancops.data.rewards import combine_rewards, normalize_rewards, reward_nor
 from blancops.ephemerides import ephemerides
 from blancops.math import geometry, units
 
-from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_FILTER
+from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_FIELD_ID, ZENITH_FILTER
 
 from blancops.data.features.normalizations import StateNormalizer, build_normalizer_kwargs, setup_feature_names
 from blancops.data.splits import NightSplit, resolve_night_split
@@ -383,14 +383,33 @@ class TransitionDataset(torch.utils.data.Dataset):
         curr_df = df.iloc[self.current_state_idxs]
         next_df = df.iloc[next_state_idxs]
         distances = geometry.angular_separation(
-            (curr_df['ra'].values, curr_df['dec'].values),
-            (next_df['ra'].values, next_df['dec'].values),
+            self._field_center_radec(curr_df), self._field_center_radec(next_df)
         )
         curr_filters = curr_df['filter'].values
         filter_change = (curr_filters != next_df['filter'].values) & (curr_filters != ZENITH_FILTER)
 
         params = self._telescope.parameters
         return params.dead_time(distances / units.deg, filter_change) - params.visit_overhead(filter_change)
+
+    def _field_center_radec(self, rows) -> tuple[np.ndarray, np.ndarray]:
+        """Lookup field-center RA/Dec per row (as the environment uses); zenith rows keep their own RA/Dec.
+
+        Parameters
+        ----------
+        rows : pd.DataFrame
+            Rows with field_id, ra, dec (radians).
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            RA and Dec in radians, each shape (n_rows,).
+        """
+        field_ids = rows['field_id'].to_numpy()
+        is_zenith = field_ids == ZENITH_FIELD_ID
+        safe_ids = np.where(is_zenith, 0, field_ids).astype(int)
+        ra = np.where(is_zenith, rows['ra'].to_numpy(), self.lookups.fields['ra'].to_numpy()[safe_ids])
+        dec = np.where(is_zenith, rows['dec'].to_numpy(), self.lookups.fields['dec'].to_numpy()[safe_ids])
+        return ra, dec
 
 
 
