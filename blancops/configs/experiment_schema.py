@@ -268,7 +268,8 @@ class RewardConfig(BaseModel):
     w_t_last_visit: float = 1.0
     w_min_tiling: float = 1.0
     # airmass_limit: float = 3.0
-    t_ref_seconds: float = 60*60*12
+    # t_ref_seconds: float = 60*60*12
+
 
 class BCAlgConfig(BaseAlgConfig):
     algorithm: Literal[Algorithm.BC]
