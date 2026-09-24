@@ -33,6 +33,48 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class StateValueMLP(nn.Module):
+    """State-value network V(s) over the global state and the flattened bin states.
+
+    Parameters
+    ----------
+    glob_dim : int
+        Global state dimension D_glob.
+    bin_dim : int
+        Flattened bin state dimension n_bins * D_bin; 0 when there are no bin features.
+    hidden : tuple[int, ...]
+        Hidden layer widths.
+    layernorm : bool
+        Whether to apply LayerNorm after each hidden layer.
+    activation : type[nn.Module]
+        Activation class.
+    """
+
+    def __init__(self, glob_dim: int, bin_dim: int, hidden: tuple[int, ...],
+                 layernorm: bool = True, activation: type[nn.Module] = nn.ReLU):
+        super().__init__()
+        self.bin_dim = bin_dim
+        self.net = build_mlp(glob_dim + bin_dim, hidden, 1, layernorm, activation)
+
+    def forward(self, x_glob: torch.Tensor, x_bin: torch.Tensor) -> torch.Tensor:
+        """Predict V(s).
+
+        Parameters
+        ----------
+        x_glob : torch.Tensor
+            Global state, shape (batch, D_glob).
+        x_bin : torch.Tensor
+            Bin states, shape (batch, n_bins, D_bin); ignored when bin_dim == 0.
+
+        Returns
+        -------
+        torch.Tensor
+            State value, shape (batch, 1).
+        """
+        if self.bin_dim > 0:
+            x_glob = torch.cat([x_glob, x_bin.flatten(start_dim=1)], dim=1)  # [batch, D_glob + n_bins * D_bin]
+        return self.net(x_glob)
+
 class ContextualScoreMLP(nn.Module):
     """
     Scores each candidate from [encoded global state, candidate bin features].

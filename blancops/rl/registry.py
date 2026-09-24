@@ -12,6 +12,7 @@ from blancops.configs.enums import _AUTOREGRESSIVE_NETWORKS, Algorithm, ActionAr
 from blancops.rl.neural_nets.neural_nets import (
     ContextualScoreMLP,
     MLP,
+    StateValueMLP,
     AutoregressiveNet,
     DualStreamMLP,
 )
@@ -310,10 +311,11 @@ def build_algorithm(cfg: ExperimentConfig, device: torch.device):
 
         target_net = copy.deepcopy(core_net).to(device)
         policy_raw = build_network(cfg).to(device)   # separate net for the AWR policy
-        v_net = MLP(
-            input_dim=cfg.data.state_dim,
-            output_dim=1,
-            hidden_dim=cfg.model.hidden_dim,
+        v_net = StateValueMLP(
+            glob_dim=cfg.data.state_dim,
+            bin_dim=cfg.data.num_bins * cfg.data.bin_state_dim,
+            hidden=(cfg.model.hidden_dim,) * cfg.model.nlayers,
+            layernorm=cfg.model.layernorm,
             activation=activation_fn,
         ).to(device)
 
