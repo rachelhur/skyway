@@ -8,12 +8,15 @@ import re
 
 
 from blancops.data.features.glob_features import get_night_boundaries
+from blancops.io.file_io import (
+    _add_night, _add_timestamp, _drop_nan_dts,
+    _replace_with_pd_dt, fits_to_df
+)
 from blancops.math import units
 
 from blancops.configs.paths import workspace
 from blancops.configs.constants import FILTER2IDX
 from blancops.data.lookup_tables import TrainLookupTables
-from blancops.io.file_io import preprocess_fits
 from blancops.math import units
 
 import logging
@@ -62,6 +65,16 @@ _DES_UNWANTED_OBJECTS = [
     "NGC",
     "ec",
     ]
+
+
+
+def preprocess_fits(fits_path): # XXX move to preprocessing.py
+    df = fits_to_df(fits_path)
+    df = df.pipe(_replace_with_pd_dt)\
+            .pipe(_drop_nan_dts)\
+            .pipe(_add_timestamp)\
+            .pipe(_add_night)
+    return df
 
 
 def load_and_process_historic_data(
