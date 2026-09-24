@@ -68,6 +68,24 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         self._initial_last_visit_ot = initial_last_visit_ot
         self._initial_ot_at_sunset = float(initial_ot_at_sunset)
 
+        # Optional start, stop, and downtime intervals
+        self._start_time = None if start_time is None else float(start_time)
+        self._stop_time = None if stop_time is None else float(stop_time)
+        # Wall-clock intervals in which the telescope was not observing, as
+        # (start, end) unix timestamps. Replays idle through them so that a
+        # simulated night covers the same observing time a real one did.
+        self._downtime_windows = sorted(
+            [] if downtime_windows is None
+            else [(float(a), float(b)) for a, b in downtime_windows]
+        )
+        self._downtime_idx = 0
+        if self._downtime_windows:
+            total = sum(b - a for a, b in self._downtime_windows)
+            logger.info(
+                f"Downtime: {len(self._downtime_windows)} intervals, "
+                f"{total / 60.0:.1f} min total"
+            )
+
         # Seed seeing for the forward simulation. Two mutually exclusive modes:
         #   1. `seeing_trajectory`: replay a real night's measured seeing via a
         #      PredictiveSeeingModel, rebuilt and re-aligned to each night's
@@ -181,6 +199,20 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         elif portion == "half2":
             start_ts = sunset_ts + (sunrise_ts - sunset_ts) / 2
 
+        if self._start_time is not None and start_ts < self._start_time < end_ts:
+            logger.info(
+                "Night start clamped from %s to start_time %s",
+                unix_to_datetime(start_ts), unix_to_datetime(self._start_time),
+            )
+            start_ts = self._start_time
+
+        if self._stop_time is not None and start_ts < self._stop_time < end_ts:
+            logger.info(
+                "Night end clamped from %s to stop_time %s",
+                unix_to_datetime(end_ts), unix_to_datetime(self._stop_time),
+            )
+            end_ts = self._stop_time
+
 
         # Anchor ot_at_sunset so that
         #     ot_now @ start_ts  ==  OT clock at the moment we rolled
@@ -276,10 +308,35 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         masking tracks the schedule's time windows. Identity when no schedule is
         set. Works for both the (nfields, nfilters) and (nfields,) mask shapes
         since field index is axis 0 in both.
+
+        A `keep_only` window releases as soon as every field it keeps is
+        complete (mimics gw followup in live scheduling)
         """
         if self._field_mask_schedule is None:
             return sel_valid
         rule = self._field_mask_schedule.active_rule(self._ts)
+        if rule.mode == "keep_only" and self._keep_only_satisfied(rule):
+            rule = self._field_mask_schedule.baseline
+            if rule.mode == "keep_only" and self._keep_only_satisfied(rule):
+                return sel_valid
         positional = self._rule_positional_masks[rule]
         sel_valid[positional] = False
         return sel_valid
+
+    def _keep_only_satisfied(self, rule) -> bool:
+        """Whether every field a `keep_only` rule retains is already complete.
+
+        Args:
+            rule: The active MaskRule.
+
+        Returns:
+            True when no field kept by the rule still owes a visit, so the rule
+            has nothing left to enforce.
+        """
+        if not rule.field_ids:
+            return False
+        kept = np.isin(self._fids, np.fromiter(rule.field_ids, dtype=int))
+        incomplete = self._survey_progress_tracker.get_incomplete_mask()
+        if incomplete.ndim == 2:
+            incomplete = incomplete.any(axis=1)
+        return not bool((kept & incomplete).any())
