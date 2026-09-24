@@ -60,6 +60,11 @@ def slew_reward(excess_times: np.ndarray, decay_time: float = 10.0) -> np.ndarra
     return np.exp(-excess_times / decay_time)
 
 
+def survey_uniformity():
+    """"""
+    pass
+
+
 REWARD_TERMS: dict[RewardTerm, Callable[..., np.ndarray]] = {
     RewardTerm.EXPERT: expert_action_reward,
     RewardTerm.TEFF: teff_reward,
