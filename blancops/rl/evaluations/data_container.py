@@ -141,6 +141,11 @@ class DataContainer(ABC):
         out['az'], out['el'] = filtered['az'].values, filtered['el'].values
         out['airmass'] = filtered['airmass'].values
 
+        # Hex name of the observed field -- used to get fields center (not dithers)
+        # for apples-to-apples comparison to learned scheduler
+        if 'field' in filtered.columns:
+            out['field'] = filtered['field'].values
+
         # Pull through all configured global features. Missing ones get NaN so
         # downstream math doesn't silently break on None.
         for feat in self.dataset.global_feature_names:
@@ -281,6 +286,10 @@ class SingleStepDataContainer(DataContainer):
     def __init__(self, val_dataset, action_space: str, lookups: LookupTables,
                  global_normalizer: StateNormalizer):
         self.prev_expert_df: pd.DataFrame = pd.DataFrame()
+        # Previous telescope pointing in radians, cached by _populate_expert_df
+        # before the frames are converted to degrees.
+        self._prev_radecs_rad = None
+        self._prev_bin_radecs_rad = None
         super().__init__(val_dataset, action_space, lookups, global_normalizer)
 
     def _populate_expert_df(self) -> None:
@@ -305,6 +314,9 @@ class SingleStepDataContainer(DataContainer):
         self.expert_df['bin_slew_dist'] = calc_slew_distance(prev_bin_radecs, bin_radecs)
         self.expert_df['slew_dist']     = calc_slew_distance(prev_radecs, radecs)
 
+        self._prev_radecs_rad     = prev_radecs.copy()
+        self._prev_bin_radecs_rad = prev_bin_radecs.copy()
+
         self.convert_to_deg(self.expert_df)
         self.convert_to_deg(self.prev_expert_df)
 
@@ -320,13 +332,7 @@ class SingleStepDataContainer(DataContainer):
         bin_radecs = df[['bin_ra', 'bin_dec']].to_numpy()
         df['bin_moon_distance'] = calc_moon_dist(bin_radecs, timestamps)
 
-        # Slew distance
-        # Both endpoints need to be consecutive agent predictions
-        valid = self._get_valid_state_mask(timestamps, max_time_diff_min=EXPERT_MAX_GAP)
-        bin_slew = calc_slew_distance(bin_radecs[:-1], bin_radecs[1:])
-        bin_slew = np.insert(bin_slew, 0, np.nan)
-        bin_slew[~valid] = np.nan
-        df['bin_slew_dist'] = bin_slew
+        df['bin_slew_dist'] = calc_slew_distance(self._prev_bin_radecs_rad, bin_radecs)
 
         if field_ids is not None:
             ra, dec, az, el = self._get_field_coords(field_ids, timestamps)
@@ -339,10 +345,7 @@ class SingleStepDataContainer(DataContainer):
             )
             radecs = np.column_stack([ra, dec])
             df['moon_distance'] = calc_moon_dist(radecs, timestamps)
-            slew = calc_slew_distance(radecs[:-1], radecs[1:])
-            slew = np.insert(slew, 0, np.nan)
-            slew[~valid] = np.nan
-            df['slew_dist'] = slew
+            df['slew_dist'] = calc_slew_distance(self._prev_radecs_rad, radecs)
             df['field_id'] = field_ids
 
         self.agent_df = df
