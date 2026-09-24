@@ -34,8 +34,8 @@ class ActionConstraints(BaseModel):
 
         if v <= 1.0:
             raise ValueError('airmass limit should be > 1.0 (minimum airmass at zenith)')
-        if v > 10.0:
-            raise ValueError('airmass limit should be <= 10.0 (extremely high airmass)')
+        if v > 3.0:
+            raise ValueError('airmass limit should be <= 3.0 (extremely high airmass)')
         return v
 
 class NormalizationConfig(BaseModel):
@@ -262,12 +262,12 @@ class BaseAlgConfig(BaseModel):
             raise ValueError(f"activation must be one of {valid_activations}, got {self.activation}")
         return self
 
-class RewardWeights(BaseModel):
+class RewardConfig(BaseModel):
     w_slew: float = 1.0
     w_airmass: float = 1.0
     w_t_last_visit: float = 1.0
     w_min_tiling: float = 1.0
-    airmass_limit: float = 3.0
+    # airmass_limit: float = 3.0
     t_ref_seconds: float = 60*60*12
 
 class BCAlgConfig(BaseAlgConfig):
@@ -286,7 +286,7 @@ class BCAlgConfig(BaseAlgConfig):
     beta_filter: float | None = None
     zeta_joint: float | None = None
     reward: RewardStructure | None = None
-    reward_weights: RewardWeights = Field(default_factory=RewardWeights)
+    reward_weights: RewardConfig = Field(default_factory=RewardConfig)
 
     @model_validator(mode="after")
     def validate_strategy_requirements(self) -> "BCAlgConfig":
@@ -315,7 +315,7 @@ class BCAlgConfig(BaseAlgConfig):
 class DDQNAlgConfig(BaseAlgConfig):
     algorithm: Literal[Algorithm.DDQN]
     reward: RewardStructure = RewardStructure.TEFF
-    reward_weights: RewardWeights = Field(default_factory=RewardWeights)
+    reward_weights: RewardConfig = Field(default_factory=RewardConfig)
     reward_norm: str = 'minmax'
     tau: float = 0.005 # DDQN specific parameter
     gamma: float = 0.99 # DDQN specific parameter

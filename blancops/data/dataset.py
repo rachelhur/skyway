@@ -326,11 +326,11 @@ class TransitionDataset(torch.utils.data.Dataset):
             logger.warning(f"Unknown reward norm: {self.reward_norm}")
         return R_tot
 
-    def _construct_airmass_reward(self, df, next_state_idxs, rw):
-        airmass = df.iloc[next_state_idxs]['airmass'].values
-        return np.clip(
-            (rw.airmass_limit - airmass) / (rw.airmass_limit - 1.0), 0.0, 1.0
-        )
+    # def _construct_airmass_reward(self, df, next_state_idxs, rw):
+    #     airmass = df.iloc[next_state_idxs]['airmass'].values
+    #     return np.clip(
+    #         (rw.airmass_limit - airmass) / (rw.airmass_limit - 1.0), 0.0, 1.0
+    #     )
 
     def _construct_slew_reward(self):
         return 1.0 - self.slew_distances.numpy() / np.pi
