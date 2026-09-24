@@ -69,6 +69,30 @@ def get_args():
                         default=RunPaths(workspace().deployable_models / 'bc_v1_max_feature_set').dataset_cache('val'),
                         help="Path to a val_dataset_cache.pt holding the validation-night DataFrame, "
                              "used with --seeing_val_night to replay a real night's measured seeing.")
+    parser.add_argument('--start_time', type=float, default=None,
+                        help="Unix timestamp at which every simulated night begins, when it "
+                             "falls inside the night. Pair with --stop_time to align a replay "
+                             "to the span a real night actually covered.")
+    parser.add_argument('--stop_time', type=float, default=None,
+                        help="Unix timestamp at which every simulated night ends, when it "
+                             "falls inside the night. Use to cut a replay at the moment the "
+                             "real night stopped, e.g. an operator ending before astronomical "
+                             "night end.")
+    parser.add_argument('--downtime_csv', type=Path, default=None,
+                        help="CSV with columns start, end (unix timestamps) giving intervals "
+                             "in which the telescope was not observing. The replay idles "
+                             "through them instead of slewing straight on, so that a simulated "
+                             "night covers the same observing time a real one did.")
+    parser.add_argument('--reset_counts_on_exhaustion', action='store_true',
+                        help="When every reachable survey target is complete, zero the visit "
+                             "counts and keep observing instead of idling to the end of the "
+                             "night. Matches live operation, where the scheduler was restarted "
+                             "against a fresh history once it ran out.")
+    parser.add_argument('--seeing_trajectory_csv', type=Path, default=None,
+                        help="CSV with columns sec_since_sunset, fwhm (arcsec), band, el (rad) "
+                             "to replay as the night's measured seeing. Use for nights that are "
+                             "not in a validation cache, e.g. a deployment night scored from its "
+                             "own telemetry. Overrides --initial_fwhm and --seeing_val_night.")
     parser.add_argument('--seeing_val_night', type=str, default=None,
                         help="Validation night key (date string in the cache's 'night' column) whose "
                              "measured seeing trajectory to replay each sim night. Overrides --initial_fwhm. "
@@ -147,6 +171,7 @@ def main():
         save_SISPI=args.save_sispi, save_movie=args.save_movie,
         save_mollweide=args.save_mollweide,
         save_state_features=args.save_state_features,
+        reset_counts_on_exhaustion=args.reset_counts_on_exhaustion,
         dump_moonset_q=args.dump_moonset_q
     )
 
@@ -181,7 +206,10 @@ def main():
     # extracted trajectory (keyed by seconds-since-sunset) is saved to the run
     # outdir for provenance and re-aligned to each sim night inside the env.
     seeing_trajectory = None
-    if args.seeing_val_night is not None:
+    if args.seeing_trajectory_csv is not None:
+        logger.info(f"Replaying seeing trajectory from {args.seeing_trajectory_csv}")
+        seeing_trajectory = pd.read_csv(args.seeing_trajectory_csv)
+    elif args.seeing_val_night is not None:
         logger.info(
             f"Extracting seeing trajectory for night {args.seeing_val_night} from "
             f"{args.val_seeing_cache}"
@@ -205,6 +233,14 @@ def main():
         window_mode=args.mask_window_mode,
     )
 
+    downtime_windows = None
+    if args.downtime_csv is not None:
+        dt = pd.read_csv(args.downtime_csv)
+        downtime_windows = list(zip(dt["start"].astype(float),
+                                    dt["end"].astype(float)))
+        logger.info(f"Loaded {len(downtime_windows)} downtime intervals from "
+                    f"{args.downtime_csv}")
+
     env = gym.make(
         id=f"gymnasium_env/{env_name}",
         cfg=model_cfg,
@@ -218,6 +254,9 @@ def main():
         initial_ot_at_sunset=initial_ot_at_sunset,
         initial_fwhm=args.initial_fwhm,
         seeing_trajectory=seeing_trajectory,
+        start_time=args.start_time,
+        stop_time=args.stop_time,
+        downtime_windows=downtime_windows,
         field_mask_schedule=field_mask_schedule,
     )
 
