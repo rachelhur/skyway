@@ -66,7 +66,7 @@ def convert_seeing(
     Returns
     -------
     float or np.ndarray of float
-        Converted seeing value.
+        Converted seeing value
     """
     # check for scalar inputs to preserve output shape
     scalar_input = np.all(
@@ -74,7 +74,8 @@ def convert_seeing(
     )
 
     # remove instrument contribution in quadrature
-    seeing = np.sqrt(np.asarray(seeing) ** 2 - from_instrument**2)
+    excess = np.asarray(seeing, dtype=float) ** 2 - from_instrument**2
+    seeing = np.sqrt(np.where(excess > 0, excess, np.nan))
 
     # airmass conversion factor
     from_am = 1.0 / np.sin(from_el)
@@ -198,6 +199,8 @@ class Seeing:
                 "el": 90 * units.deg,
             }
         )
+        # RH: NaN RunTimeWarning fix: nan measurements turned window medians into NaN
+        self.data = self.data.loc[np.isfinite(self.data["seeing"].to_numpy(dtype=float))].reset_index(drop=True)
 
         # drop old history if requested
         if prune:
