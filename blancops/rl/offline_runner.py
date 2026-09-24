@@ -106,7 +106,7 @@ class OfflineRunner:
             propid=_PROPID_PLACEHOLDER,
         )
         return self._sispi_dir / out_fn
-    
+
     def _write_full_survey_sispi(self, ep_num, night_csv_paths):
         """Concatenate all per-night CSVs and write a single full-survey SISPI JSON.
 
@@ -136,7 +136,7 @@ class OfflineRunner:
         )
         return self._sispi_dir / out_fn, df
 
-        
+
     # ------------------------------------------------------------------
     # Optional obs-feature flushing (for diagnostic plots)
     # ------------------------------------------------------------------
