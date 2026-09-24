@@ -43,6 +43,7 @@ class RewardTerm(str, Enum):
     TEFF = "teff"
     SLEW = "slew"
     EXPERT = "expert"
+    UNIFORMITY = "uniformity"
 
 
 class LookupKeys(str, Enum):
