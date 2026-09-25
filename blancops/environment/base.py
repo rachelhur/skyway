@@ -26,7 +26,7 @@ from blancops import math
 from blancops.configs.constants import _NUM_FILTERS
 from blancops.configs.enums import RewardTerm
 from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig, RLAlgConfig
-from blancops.data.rewards import combine_rewards, normalize_rewards
+from blancops.data.rewards import combine_rewards, normalize_rewards, uniformity_inputs
 from blancops.data_quality.teff import predict_teff
 from blancops.data.features.bin_features import (
     # Shared per-timestep helpers — single source of truth for bin features.
@@ -633,10 +633,38 @@ class BaseBlancoEnv(gym.Env, ABC):
             self.lookups.fidfilt_exptime[int(field_id), int(filter_idx)]
         )
 
+    def _uses_reward_term(self, term: RewardTerm) -> bool:
+        """Whether the configured reward includes a term."""
+        return self._reward_cfg is not None and term in self._reward_cfg.terms
+
     def _needs_seeing_model(self) -> bool:
-        """Whether the fwhm feature or the teff reward term requires a seeing model."""
-        uses_teff = self._reward_cfg is not None and RewardTerm.TEFF in self._reward_cfg.terms
-        return "fwhm" in self.global_feature_names or uses_teff
+        """Whether the fwhm feature, or the teff or uniformity reward term (via predicted teff), needs a seeing model."""
+        return ("fwhm" in self.global_feature_names or self._uses_reward_term(RewardTerm.TEFF)
+                or self._uses_reward_term(RewardTerm.UNIFORMITY))
+
+    def _uniformity_step_inputs(self, s: dict) -> dict | None:
+        """Uniformity reward inputs from survey counts before this exposure; None when the term is unused.
+
+        An exposure whose predicted teff is at or below the survey threshold earns no uniformity credit
+        (pass_size 0). The tracker still counts it, as for all runs.
+
+        Parameters
+        ----------
+        s : dict
+            Step record with field_id, filter_idx, and t_start.
+
+        Returns
+        -------
+        dict or None
+            Keyword arguments for uniformity_reward, or None.
+        """
+        if not self._uses_reward_term(RewardTerm.UNIFORMITY):
+            return None
+        tracker = self._survey_progress_tracker
+        inputs = uniformity_inputs(tracker.raw_counts, tracker.target_counts, s['field_id'], s['filter_idx'])
+        if self._predict_teff(s) <= DES.valid_teff_threshold:
+            inputs['pass_size'] = np.zeros(1)
+        return inputs
 
     def _get_rewards(self) -> float:
         """Reward for the last step, from the dataset's reward terms and the training reward stats.
@@ -660,6 +688,7 @@ class BaseBlancoEnv(gym.Env, ABC):
             RewardTerm.TEFF: lambda: dict(teff=np.array([self._predict_teff(s)])),
             RewardTerm.SLEW: lambda: dict(excess_times=np.array(
                 [s['dead_time'] - params.visit_overhead(s['filter_change'])])),
+            RewardTerm.UNIFORMITY: lambda: s['uniformity'],
         }
 
     def _predict_teff(self, s: dict) -> float:

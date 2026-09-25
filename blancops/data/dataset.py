@@ -2,6 +2,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 import numpy as np
+import pandas as pd
 import json
 import logging
 from pathlib import Path
@@ -375,7 +376,73 @@ class TransitionDataset(torch.utils.data.Dataset):
             RewardTerm.EXPERT: lambda: dict(n_transitions=len(next_state_idxs)),
             RewardTerm.TEFF: lambda: dict(teff=next_df['teff'].values),
             RewardTerm.SLEW: lambda: dict(excess_times=self._excess_dead_times(df, next_state_idxs)),
+            RewardTerm.UNIFORMITY: lambda: self._uniformity_inputs(df, next_state_idxs),
         }
+
+    def _uniformity_inputs(self, df, next_state_idxs) -> dict: # XXX make independent of form of uniformity metric
+        """Inputs of the uniformity reward for each transition, from survey counts before its exposure.
+
+        count_before = count at night start (lookups.night2fidfilt_visit_hist) + earlier exposures of the
+        field-filter that night; filter_mean m_b = (night-start sum of counts over in-plan fields + earlier
+        in-plan exposures in the filter that night) / W_b, with W_b the filter's total target. Only valid
+        exposures (teff above the survey threshold, as in the lookups) advance completion: a failed
+        exposure has pass_size 0, so its reward is 0 and it does not count toward later ones. All rows of
+        the night are scanned, including rows whose transitions were dropped.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Global DataFrame with night, field_id, filter columns, in time order within each night.
+        next_state_idxs : np.ndarray
+            Row index of each transition's exposure.
+
+        Returns
+        -------
+        dict
+            completion, filter_mean, total_target, pass_size, each shape (n_transitions,).
+        """
+        visit_hist = getattr(self.lookups, 'night2fidfilt_visit_hist', None)
+        if visit_hist is None:
+            raise ValueError("The uniformity reward needs lookups.night2fidfilt_visit_hist; rebuild lookups.")
+        if 'filter' not in self._action_space_str:
+            raise ValueError("The uniformity reward needs a filter action space (azel_filter or radec_filter).")
+
+        targets = self.lookups.target_fidfilt_counts.astype(float)                      # [n_fields, n_filters]
+        in_plan = targets > 0
+        total_target = targets.sum(axis=0)                                              # [n_filters]
+        inv_target = np.divide(1.0, targets, out=np.zeros_like(targets), where=in_plan)
+
+        is_exposure = (df['field_id'] != ZENITH_FIELD_ID).to_numpy()
+        is_valid = is_exposure & (df['teff'].to_numpy() > DES.valid_teff_threshold)
+        field_ids = np.where(is_exposure, df['field_id'].to_numpy(), 0).astype(int)
+        filter_idxs = df['filter'].map(FILTER2IDX).fillna(0).to_numpy().astype(int)
+        pass_size = np.where(is_valid, inv_target[field_ids, filter_idxs], 0.0)
+
+        count_start = np.zeros(len(df))
+        sum_n_start = np.zeros(len(df))
+        for night, rows in df.groupby('night').indices.items():
+            night_counts = visit_hist[night].astype(float)
+            count_start[rows] = night_counts[field_ids[rows], filter_idxs[rows]]
+            sum_n_start[rows] = (night_counts * in_plan).sum(axis=0)[filter_idxs[rows]]
+
+        exposures = pd.DataFrame({
+            'night': df['night'].to_numpy(), 'field_id': field_ids,
+            'filter_idx': filter_idxs, 'in_plan': (pass_size > 0).astype(float),
+        })[is_valid]
+        earlier_visits = np.zeros(len(df))
+        earlier_in_plan = np.zeros(len(df))
+        earlier_visits[is_valid] = exposures.groupby(['night', 'field_id', 'filter_idx']).cumcount().to_numpy()
+        earlier_in_plan[is_valid] = (
+            exposures.groupby(['night', 'filter_idx'])['in_plan'].cumsum() - exposures['in_plan']
+        ).to_numpy()
+
+        idx = next_state_idxs
+        return dict(
+            completion=(count_start[idx] + earlier_visits[idx]) * pass_size[idx],
+            filter_mean=(sum_n_start[idx] + earlier_in_plan[idx]) / total_target[filter_idxs[idx]],
+            total_target=total_target[filter_idxs[idx]],
+            pass_size=pass_size[idx],
+        )
 
     def _excess_dead_times(self, df, next_state_idxs) -> np.ndarray:
         """Excess dead time beyond the per-visit overhead.

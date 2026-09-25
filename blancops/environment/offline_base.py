@@ -87,6 +87,7 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
                 field_id=field_id, filter_idx=filter_idx, t_start=self._ts + dead_time,
                 dead_time=dead_time, filter_change=filter_change,
             )
+            self._step_record['uniformity'] = self._uniformity_step_inputs(self._step_record)
             self._ts += dead_time + exptime
             self._ts = self._skip_downtime(self._ts)
 
