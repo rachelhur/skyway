@@ -243,6 +243,8 @@ class OfflineRunner:
             per_night_obs = {'glob_observations': [], 'bin_observations': [], 'action_masks': []} if self.save_state_features else None
 
             episode_manifest = {}  # night_key -> csv path
+            episode_dispersion = {}  # night_key -> per-filter (D_b, baseline_b) at the night's last in-night step
+            night_dispersion = env.unwrapped._survey_progress_tracker.dispersion_index()
             reward = 0
             night_idx = 0
             current_night_key = f'night-{night_idx}'
@@ -315,7 +317,10 @@ class OfflineRunner:
                     last_bin_idx = bin_idx
 
                     # Night boundary: flush current night and open next
-                    if info.get('night_idx') != night_idx:
+                    if info.get('night_idx') == night_idx:
+                        night_dispersion = env.unwrapped._survey_progress_tracker.dispersion_index()
+                    else:
+                        episode_dispersion[current_night_key] = self._dispersion_record(night_dispersion)
                         csv_path = self._flush_night_csv(per_night_rows, ep_num, current_night_key)
                         episode_manifest[current_night_key] = str(csv_path) if csv_path else None
                         if csv_path is not None:
@@ -342,6 +347,7 @@ class OfflineRunner:
             logger.info(f'terminated at step {i}')
 
             # Flush the final night
+            episode_dispersion[current_night_key] = self._dispersion_record(night_dispersion)
             csv_path = self._flush_night_csv(per_night_rows, ep_num, current_night_key)
             episode_manifest[current_night_key] = str(csv_path) if csv_path else None
             if csv_path is not None:
@@ -363,15 +369,16 @@ class OfflineRunner:
             episode_rewards.append(running_reward)
             pbar.close()
 
-        rollout_info = self._construct_diagnostics(episode_rewards, episode_manifest, ep_num)
+        rollout_info = self._construct_diagnostics(episode_rewards, episode_manifest, ep_num, episode_dispersion)
         self._write_diagnostics_to_file(rollout_info)
         return rollout_info
 
-    def _construct_diagnostics(self, episode_rewards, episode_manifest, ep_num):
+    def _construct_diagnostics(self, episode_rewards, episode_manifest, ep_num, episode_dispersion=None):
         diagnostics = {
             f'ep-{ep_num}': {
                 'manifest': dict(episode_manifest),
                 'total_reward': float(episode_rewards[ep_num]) if episode_rewards else 0.0,
+                'dispersion': dict(episode_dispersion or {}),
             },
             'mean_reward': float(np.mean(episode_rewards)) if episode_rewards else 0.0,
             'std_reward':  float(np.std(episode_rewards))  if episode_rewards else 0.0,
@@ -380,6 +387,12 @@ class OfflineRunner:
             'episode_rewards': episode_rewards,
         }
         return diagnostics
+
+    @staticmethod
+    def _dispersion_record(dispersion) -> dict:
+        """Per-filter dispersion index D_b = Var_b / m_b and its random-visit baseline, as lists."""
+        d, baseline = dispersion
+        return {'dispersion': d.tolist(), 'baseline': baseline.tolist()}
 
     def _write_diagnostics_to_file(self, rollout_info):
         with open(self.outdir / 'rollout_info.pkl', 'wb') as handle:

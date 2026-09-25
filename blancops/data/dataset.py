@@ -22,6 +22,7 @@ from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FI
 
 from blancops.data.features.normalizations import StateNormalizer, build_normalizer_kwargs, setup_feature_names
 from blancops.data.splits import NightSplit, resolve_night_split
+from blancops.survey.profiles import DES
 from blancops.telescope.base import TelescopeProfile
 from blancops.telescope.registry import get_telescope
 
@@ -178,6 +179,7 @@ class TransitionDataset(torch.utils.data.Dataset):
 
         self._load_from_cache(cache)
         self._build_transitions(cfg.data.action_space)
+        self._apply_min_teff()
         self._split_data(cfg)
         self._normalize_rewards()
         self._normalize_states(norm_kwargs)
@@ -190,6 +192,7 @@ class TransitionDataset(torch.utils.data.Dataset):
 
     def _setup_configuration(self, cfg, norm_kwargs):
         self._seeing_cfg = cfg.data.seeing
+        self._min_teff = cfg.data.min_teff
         self.reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
         self._calculate_action_mask = cfg.model.algorithm != 'bc' # expensive and not needed for bc
         self.include_bin_features = len(cfg.data.bin_features) > 0
@@ -310,6 +313,27 @@ class TransitionDataset(torch.utils.data.Dataset):
             self._prenorm_bin_states = torch.as_tensor(bin_states, dtype=torch.float32)
         else:
             self._prenorm_bin_states = None
+
+    def _apply_min_teff(self) -> None:
+        """Drop transitions whose exposure has teff <= min_teff; no-op when min_teff is None.
+
+        Runs after _build_transitions, so dones (night ends) are computed on the full sequence and a
+        dropped mid-night exposure does not end an episode early.
+        """
+        if self._min_teff is None:
+            return
+        keep = self._df['teff'].to_numpy()[self.next_state_idxs] > self._min_teff
+        logger.info(f"min_teff={self._min_teff}: keeping {int(keep.sum())} of {len(keep)} transitions")
+        self.current_state_idxs = self.current_state_idxs[keep]
+        self.next_state_idxs = self.next_state_idxs[keep]
+        self.curr_compact_idxs = self.curr_compact_idxs[keep]
+        self.next_compact_idxs = self.next_compact_idxs[keep]
+        keep_t = torch.as_tensor(keep)
+        self.slew_distances = self.slew_distances[keep_t]
+        self.actions = self.actions[keep_t]
+        self.rewards = self.rewards[keep_t]
+        self.dones = self.dones[keep_t]
+        self.num_transitions = int(keep.sum())
 
     def _construct_dones(self, num_transitions, next_state_idxs, current_state_idxs):
         dones = ~np.isin(next_state_idxs, current_state_idxs)

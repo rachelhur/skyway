@@ -28,6 +28,7 @@ from blancops.configs.enums import RewardTerm
 from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig, RLAlgConfig
 from blancops.data.rewards import combine_rewards, normalize_rewards, uniformity_inputs
 from blancops.data_quality.teff import predict_teff
+from blancops.survey.profiles import DES
 from blancops.data.features.bin_features import (
     # Shared per-timestep helpers — single source of truth for bin features.
     _STALENESS_BASE_KEYS,

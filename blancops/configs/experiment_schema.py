@@ -168,6 +168,9 @@ class TrainDataConfig(BaseDataConfig):
     test_frac: Optional[float] = None
     train_val_split: float = 0.9  # deprecated; feeds val_frac when val_frac is None
 
+    # Drop transitions whose exposure has teff <= min_teff (e.g. 0.3 for BC); None keeps all
+    min_teff: Optional[float] = None
+
     @field_validator('start_date', 'end_date', 'val_nights', 'test_nights', mode='before')
     @classmethod
     def dates_to_iso_strings(cls, v):
