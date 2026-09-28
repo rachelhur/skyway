@@ -216,19 +216,45 @@ class EvaluationPlotter:
     # Mollweide / line / scatter / hist / residual
     # ------------------------------------------------------------------
 
-    def plot_mollweide_res(self, timestamps, expert_bin_idxs, agent_bin_idxs, field_pos, nside):
-        plot_schedule_whole(
-            outfile=self.outdir / 'mollweide_residuals',
-            times=timestamps,
-            field_pos=None,
-            bin_idxs=expert_bin_idxs,
-            alternate_bin_idxs=agent_bin_idxs,
-            nside=nside,
-            sky_bin_mapping=None,
-            projection='mollweide',
-            center_pos=(None, None),
-            schedule_label='',
-        )
+    def plot_mollweide_res(self, expert_times, agent_times, expert_bin_idxs=None, agent_bin_idxs=None,
+                           expert_field_pos=None, agent_field_pos=None, nside=None):
+        """Expert vs agent sky coverage: a bin visit-count residual map when bin indices are given, else one
+        field map per schedule.
+
+        Parameters
+        ----------
+        expert_times, agent_times : np.ndarray
+            Observation times (Unix seconds, UTC) of each schedule.
+        expert_bin_idxs, agent_bin_idxs : np.ndarray or None
+            HEALPix bin per observation (bin-level models). Requires nside.
+        expert_field_pos, agent_field_pos : np.ndarray or None
+            Field (ra, dec) in radians per observation, shape (n_obs, 2) (field-level models).
+        nside : int or None
+            HEALPix nside of the bin indices.
+
+        Returns
+        -------
+        None
+        """
+        if expert_bin_idxs is not None:
+            plot_schedule_whole(
+                outfile=self.outdir / 'mollweide_residuals',
+                times=agent_times,
+                bin_idxs=expert_bin_idxs,
+                alternate_bin_idxs=agent_bin_idxs,
+                nside=nside,
+                projection='mollweide',
+            )
+            return
+        for label, times, field_pos in (('expert', expert_times, expert_field_pos),
+                                        ('agent', agent_times, agent_field_pos)):
+            plot_schedule_whole(
+                outfile=self.outdir / f'mollweide_{label}_fields',
+                times=times,
+                field_pos=field_pos,
+                projection='mollweide',
+                schedule_label=f'{label.capitalize()} Schedule',
+            )
 
     def plot_line_comparison(self, feature_name, expert_arr, agent_arr, ax=None):
         ax = ax or plt.gca()
