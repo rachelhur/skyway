@@ -8,12 +8,12 @@ import time
 from blancops.rl.trainer import Trainer
 from blancops.utils.sys_utils import get_system_device, seed_everything
 from blancops.io.logger_utils import configure_logger
-from blancops.data.dataset import TransitionDataset, OfflineDataset
-from blancops.data.feature_cache import FieldFeatureCache, RawFeatureCache, DatasetCache
+from blancops.data.dataset import TransitionDataset, TransitionDatasetCache, OfflineDataset
+from blancops.data.feature_cache import FieldFeatureCache, BinFeatureCache
 from blancops.data.splits import resolve_night_split
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.plotting.training_viz import (
-    plot_bin_feature_distributions, plot_bin_membership,
+    plot_candidate_feature_distributions, plot_bin_membership,
     plot_global_feature_distributions, plot_train_metrics,
 )
 from blancops.rl.registry import build_algorithm
@@ -86,7 +86,7 @@ def main():
     data_dir = Path(args.data_dir)
     is_azel = grid_is_azel(cfg.data.action_space)
     field_level = is_field_level(cfg.data.action_space)
-    cache_cls = FieldFeatureCache if field_level else RawFeatureCache
+    cache_cls = FieldFeatureCache if field_level else BinFeatureCache
     cache_dir = field_feature_cache_dir(data_dir) if field_level else feature_cache_dir(data_dir, cfg.data.nside, is_azel)
 
     if not cache_cls.exists(cache_dir):
@@ -115,7 +115,7 @@ def main():
     if field_level:
         cache = FieldFeatureCache.load(cache_dir, mmap=True, start_date=cfg.data.start_date, end_date=cfg.data.end_date)
     else:
-        cache = RawFeatureCache.load(
+        cache = BinFeatureCache.load(
             cache_dir, mmap_bin=True,
             start_date=cfg.data.start_date,
             end_date=cfg.data.end_date,
@@ -156,7 +156,7 @@ def main():
             split_role=split,
         )
         split_cache_path = run_paths.dataset_cache(split)
-        DatasetCache.from_transition_dataset(split_dataset, split=split).save(split_cache_path)
+        TransitionDatasetCache.from_transition_dataset(split_dataset, split=split).save(split_cache_path)
         logger.info(f"{split} dataset cache saved to {split_cache_path}")
         del split_raw_cache, split_dataset
         gc.collect()
@@ -169,7 +169,7 @@ def main():
     if not field_level:
         plot_bin_membership(train_dataset, run_paths.figures)
     plot_global_feature_distributions(train_dataset, run_paths.figures)
-    plot_bin_feature_distributions(train_dataset, run_paths.figures)
+    plot_candidate_feature_distributions(train_dataset, run_paths.figures)
 
     # --- DATALOADERS --- #
     offline_dataset = OfflineDataset(
@@ -227,7 +227,7 @@ def main():
         valloader=valloader,
         batch_size=cfg.train.batch_size,
         patience=cfg.train.patience,
-        hpGrid=train_dataset.hpGrid,
+        candidate_grid=train_dataset.candidate_grid,
         norm_stats=norm_stats.to_dict(),
     )
     end_time = time.time()

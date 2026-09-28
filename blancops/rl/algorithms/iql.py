@@ -71,7 +71,7 @@ class IQL(AlgorithmBase):
     # Multi-net train/val overrides (AlgorithmBase only handles self.policy)
     # ----------------------------------------------------------------------- #
 
-    def train_step(self, batch, epoch_num, step_num=None, hpGrid=None, compute_metrics=False) -> dict:
+    def train_step(self, batch, epoch_num, step_num=None, candidate_grid=None, compute_metrics=False) -> dict:
         self.q_adapter.train()
         self.v_net.train()
         self.policy.train()
@@ -79,7 +79,7 @@ class IQL(AlgorithmBase):
 
         batch_dict = self._unpack_batch(batch)
         with torch.amp.autocast(self.device_type_str, dtype=self.amp_dtype):
-            loss, metrics = self._compute_loss(batch_dict, hpGrid=hpGrid, compute_metrics=compute_metrics)
+            loss, metrics = self._compute_loss(batch_dict, candidate_grid=candidate_grid, compute_metrics=compute_metrics)
 
         loss.backward()
         all_params = [*self.q_adapter.parameters(), *self.v_net.parameters(), *self.policy.parameters()]
@@ -91,7 +91,7 @@ class IQL(AlgorithmBase):
         metrics["train_loss"] = loss.item()
         return metrics
 
-    def val_step(self, batch, hpGrid=None) -> dict:
+    def val_step(self, batch, candidate_grid=None) -> dict:
         self.q_adapter.eval()
         self.v_net.eval()
         self.policy.eval()
@@ -99,7 +99,7 @@ class IQL(AlgorithmBase):
 
         with torch.no_grad():
             with torch.amp.autocast(self.device_type_str, dtype=self.amp_dtype):
-                loss, metrics = self._compute_loss(batch_dict, hpGrid=hpGrid, compute_metrics=True)
+                loss, metrics = self._compute_loss(batch_dict, candidate_grid=candidate_grid, compute_metrics=True)
 
         metrics["val_loss"] = loss.item()
         return metrics
@@ -110,21 +110,21 @@ class IQL(AlgorithmBase):
 
     def _unpack_batch(self, batch) -> dict:
         (state, actions, rewards, next_state, dones,
-         action_masks, next_action_masks, bin_states, next_bin_states, _) = batch
+         action_masks, next_action_masks, candidate_states, next_candidate_states, _) = batch
 
         return {
-            "state":             self._to_dev(state, torch.float32),
-            "next_state":        self._to_dev(next_state, torch.float32),
-            "bin_states":        self._to_dev(bin_states, torch.float32),
-            "next_bin_states":   self._to_dev(next_bin_states, torch.float32),
-            "actions":           self._to_dev(actions, torch.long).unsqueeze(1),
-            "rewards":           self._to_dev(rewards, torch.float32),
-            "dones":             self._to_dev(dones, torch.float32),
-            "action_masks":      self._to_dev(action_masks, torch.bool),
-            "next_action_masks": self._to_dev(next_action_masks, torch.bool),
+            "state":                 self._to_dev(state, torch.float32),
+            "next_state":            self._to_dev(next_state, torch.float32),
+            "candidate_states":      self._to_dev(candidate_states, torch.float32),
+            "next_candidate_states": self._to_dev(next_candidate_states, torch.float32),
+            "actions":               self._to_dev(actions, torch.long).unsqueeze(1),
+            "rewards":               self._to_dev(rewards, torch.float32),
+            "dones":                 self._to_dev(dones, torch.float32),
+            "action_masks":          self._to_dev(action_masks, torch.bool),
+            "next_action_masks":     self._to_dev(next_action_masks, torch.bool),
         }
 
-    def _compute_loss(self, batch_dict, hpGrid=None, compute_metrics=False):
+    def _compute_loss(self, batch_dict, candidate_grid=None, compute_metrics=False):
         # Three separate loss terms, summed for a single backward pass.
         v_loss, v_pred, q_target_taken = self._compute_v_loss(batch_dict)
         q_loss, q_pred_taken, q_expected = self._compute_q_loss(batch_dict)
@@ -145,7 +145,7 @@ class IQL(AlgorithmBase):
                 q_expected=q_expected,
                 v_pred=v_pred,
                 advantages=advantages,
-                hpGrid=hpGrid,
+                candidate_grid=candidate_grid,
             )
         return loss, metrics
 
@@ -163,14 +163,14 @@ class IQL(AlgorithmBase):
         objective stable — V tracks a slowly-moving Q.
         """
         state = batch_dict["state"]
-        bin_states = batch_dict["bin_states"]
+        candidate_states = batch_dict["candidate_states"]
         actions = batch_dict["actions"]
 
         with torch.no_grad():
-            q_target_all = self.q_target_adapter.get_q_values(state, bin_states)
+            q_target_all = self.q_target_adapter.get_q_values(state, candidate_states)
             q_target_taken = q_target_all.gather(1, actions).squeeze(1)
 
-        v_pred = self.v_net(x_glob=state, x_bin=bin_states).squeeze(-1)
+        v_pred = self.v_net(x_glob=state, x_cand=candidate_states).squeeze(-1)
         diff = q_target_taken - v_pred  # advantage estimate
         v_loss = _expectile_loss(diff, self.expectile).mean()
         return v_loss, v_pred, q_target_taken
@@ -179,18 +179,18 @@ class IQL(AlgorithmBase):
         """Q(s, a) regresses toward r + γ · V(s'). No max over next actions —
         this is what keeps IQL implicit and OOD-safe."""
         state = batch_dict["state"]
-        bin_states = batch_dict["bin_states"]
+        candidate_states = batch_dict["candidate_states"]
         next_state = batch_dict["next_state"]
-        next_bin_states = batch_dict["next_bin_states"]
+        next_candidate_states = batch_dict["next_candidate_states"]
         actions = batch_dict["actions"]
         rewards = batch_dict["rewards"]
         dones = batch_dict["dones"]
 
-        q_all = self.q_adapter.get_q_values(state, bin_states)
+        q_all = self.q_adapter.get_q_values(state, candidate_states)
         q_pred_taken = q_all.gather(1, actions).squeeze(1)
 
         with torch.no_grad():
-            v_next = self.v_net(x_glob=next_state, x_bin=next_bin_states).squeeze(-1)
+            v_next = self.v_net(x_glob=next_state, x_cand=next_candidate_states).squeeze(-1)
             q_expected = rewards + self.gamma * v_next * (1 - dones)
 
         q_loss = self.loss_function(q_pred_taken, q_expected)
@@ -202,7 +202,7 @@ class IQL(AlgorithmBase):
         get higher weight; the clip prevents a few outliers from dominating.
         """
         state = batch_dict["state"]
-        bin_states = batch_dict["bin_states"]
+        candidate_states = batch_dict["candidate_states"]
         actions = batch_dict["actions"]
         action_masks = batch_dict["action_masks"]
 
@@ -210,7 +210,7 @@ class IQL(AlgorithmBase):
             adv = q_target_taken - v_pred
             weights = torch.exp(self.awr_beta * adv).clamp(max=self.awr_clip)
 
-        action_logits = self.policy_net.get_q_values(state, bin_states)
+        action_logits = self.policy_net.get_q_values(state, candidate_states)
         mask_val = torch.finfo(action_logits.dtype).min
         action_logits = action_logits.masked_fill(~action_masks, mask_val)
 
@@ -230,25 +230,25 @@ class IQL(AlgorithmBase):
         q_loss, v_loss, pi_loss,
         q_pred_taken, q_expected,
         v_pred, advantages,
-        hpGrid,
+        candidate_grid,
     ):
 
         state = batch_dict["state"]
-        bin_states = batch_dict["bin_states"]
+        candidate_states = batch_dict["candidate_states"]
         actions = batch_dict["actions"]
         action_masks = batch_dict["action_masks"]
         expert_squeezed = actions.squeeze(1)
 
         # Argmax over the *policy* (not Q) — this is what IQL actually deploys.
         with torch.no_grad():
-            policy_logits = self.policy_net.get_q_values(state, bin_states)
+            policy_logits = self.policy_net.get_q_values(state, candidate_states)
             policy_logits = policy_logits.masked_fill(
                 ~action_masks, torch.finfo(policy_logits.dtype).min
             )
             predicted_actions = policy_logits.argmax(dim=1)
 
             # Q stats for diagnostics
-            q_all = self.q_adapter.get_q_values(state, bin_states)
+            q_all = self.q_adapter.get_q_values(state, candidate_states)
 
         metrics = {
             "q_loss":   q_loss.item(),
@@ -264,9 +264,9 @@ class IQL(AlgorithmBase):
             "accuracy": (predicted_actions == expert_squeezed).float().mean().item(),
         }
 
-        if hpGrid is not None:
+        if candidate_grid is not None:
             heavy = self.policy.compute_heavy_metrics(
-                predicted_actions, expert_squeezed, hpGrid, self.policy.num_filters
+                predicted_actions, expert_squeezed, candidate_grid, self.policy.num_filters
             )
             metrics.update(heavy)
 

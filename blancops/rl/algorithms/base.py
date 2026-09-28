@@ -42,7 +42,7 @@ class AlgorithmBase(ABC):
     # ----------------------------------------------------------------------- #
 
     def train_step(
-        self, batch, epoch_num, step_num=None, hpGrid=None, compute_metrics=False) -> dict:
+        self, batch, epoch_num, step_num=None, candidate_grid=None, compute_metrics=False) -> dict:
         self.policy.train()
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -50,7 +50,7 @@ class AlgorithmBase(ABC):
 
         with torch.amp.autocast(self.device_type_str, dtype=self.amp_dtype):
             loss, metrics = self._compute_loss(
-                batch_dict, hpGrid=hpGrid, compute_metrics=compute_metrics
+                batch_dict, candidate_grid=candidate_grid, compute_metrics=compute_metrics
             )
 
         loss.backward()
@@ -62,14 +62,14 @@ class AlgorithmBase(ABC):
         metrics["train_loss"] = loss.item()
         return metrics
 
-    def val_step(self, batch, hpGrid=None) -> dict:
+    def val_step(self, batch, candidate_grid=None) -> dict:
         self.policy.eval()
         batch_dict = self._unpack_batch(batch)
 
         with torch.no_grad():
             with torch.amp.autocast(self.device_type_str, dtype=self.amp_dtype):
                 loss, metrics = self._compute_loss(
-                    batch_dict, hpGrid=hpGrid, compute_metrics=True
+                    batch_dict, candidate_grid=candidate_grid, compute_metrics=True
                 )
 
         metrics["val_loss"] = loss.item()
@@ -86,7 +86,7 @@ class AlgorithmBase(ABC):
 
     @abstractmethod
     def _compute_loss(
-        self, batch_dict: dict, hpGrid=None, compute_metrics: bool = False) -> tuple[torch.Tensor, dict]:
+        self, batch_dict: dict, candidate_grid=None, compute_metrics: bool = False) -> tuple[torch.Tensor, dict]:
         """Return (loss_tensor, metrics_dict). metrics_dict may be empty if
         compute_metrics is False."""
         ...

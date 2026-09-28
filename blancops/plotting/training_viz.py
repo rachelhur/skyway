@@ -27,7 +27,7 @@ def plot_train_metrics(results_outdir, dataset):
     axs[0].vlines(x=best_epoch, ymax=np.max(val_metrics['val_loss']), ymin=0, color='grey', linestyle='dashed', lw=.5)
     axs[0].hlines(y=np.min(val_metrics['val_loss']), xmin=0, xmax=val_metrics['epoch'][-1], linestyle='dashed', color='grey', lw=.5)
     axs[0].set_ylabel('Loss', fontsize=14)
-    for i, met_name in enumerate(['bin_loss', 'filter_loss']):
+    for i, met_name in enumerate(['candidate_loss', 'filter_loss']):
         if met_name in val_metrics.keys():
             axs[0].plot(train_metrics['epoch'], train_metrics[met_name], color=f'C{i+1}', linestyle='dotted')
             axs[0].plot(val_metrics['epoch'], val_metrics[met_name], color=f'C{i+1}', label='val ' + met_name)
@@ -36,7 +36,7 @@ def plot_train_metrics(results_outdir, dataset):
     axs[1].plot(train_metrics['epoch'], train_metrics['accuracy'], label='train accuracy', color='black', linestyle='dotted')
     axs[1].plot(val_metrics['epoch'], val_metrics['accuracy'], label='val accuracy')
     if 'filter_accuracy' in val_metrics.keys():
-        for i, met_name in enumerate(['bin_accuracy', 'filter_accuracy']):
+        for i, met_name in enumerate(['candidate_accuracy', 'filter_accuracy']):
             if met_name in val_metrics.keys():
                 axs[1].plot(train_metrics['epoch'], train_metrics[met_name], color=f'C{i+1}', linestyle='dotted')
                 axs[1].plot(val_metrics['epoch'], val_metrics[met_name], label=met_name, color=f'C{i+1}')
@@ -45,17 +45,17 @@ def plot_train_metrics(results_outdir, dataset):
                 axs[1].legend(fontsize=10)
 
     if 'ang_sep' in val_metrics:
-        lonlat = np.array((dataset.hpGrid.lon, dataset.hpGrid.lat))
+        lonlat = np.array((dataset.candidate_grid.lon, dataset.candidate_grid.lat))
         pos1 = lonlat[:, :-1]
         pos2 = lonlat[:, 1:]
         ang_seps = geometry.angular_separation(pos1=pos1, pos2=pos2)
-        average_bin_sep = np.mean(ang_seps)
+        average_cand_sep = np.mean(ang_seps)
 
         axs[2].plot(train_metrics['epoch'], np.array(train_metrics['ang_sep']), label='train', color='black', linestyle='dotted')
         axs[2].plot(val_metrics['epoch'], np.array(val_metrics['ang_sep']), label='val')
         axs[2].set_ylabel('Angular separation \n (deg)', fontsize=14)
         axs[2].set_xlabel('Epoch')
-        axs[2].hlines(y=average_bin_sep/units.deg, xmin=0, xmax=np.max(train_metrics['epoch']), label='average bin sep', color='red', linestyle='dashed')
+        axs[2].hlines(y=average_cand_sep/units.deg, xmin=0, xmax=np.max(train_metrics['epoch']), label='average candidate sep', color='red', linestyle='dashed')
         axs[2].legend(fontsize=10)
 
     for ax in axs:
@@ -64,19 +64,18 @@ def plot_train_metrics(results_outdir, dataset):
     fig.tight_layout()
     fig.savefig(run_paths.figures / 'loss_and_metrics_history.png')    
     
-    if 'unique_bins' in val_metrics:
-        # Count bins with < 10 examples
-        bin_ids, _ = np.unique(dataset.actions.detach().numpy(), return_counts=True)
-        total_bin_diversity = len(bin_ids)/dataset.num_actions
+    if 'unique_candidates' in val_metrics:
+        cand_ids, _ = np.unique(dataset.actions.detach().numpy(), return_counts=True)
+        total_cand_diversity = len(cand_ids)/dataset.num_actions
         fig, ax = plt.subplots()
-        ax.plot(train_metrics['epoch'], train_metrics['unique_bins'], label='train', color='grey', alpha=.5, linestyle='dotted')
-        ax.plot(val_metrics['epoch'], val_metrics['unique_bins'], label='val')
-        ax.set_ylabel('Unique bins \n (normalized by total number of bins)', fontsize=14)
+        ax.plot(train_metrics['epoch'], train_metrics['unique_candidates'], label='train', color='grey', alpha=.5, linestyle='dotted')
+        ax.plot(val_metrics['epoch'], val_metrics['unique_candidates'], label='val')
+        ax.set_ylabel('Unique candidates \n (normalized by total number of candidates)', fontsize=14)
         ax.set_xlabel('Epoch')
-        ax.hlines(y=total_bin_diversity, xmin=0, xmax=np.max(train_metrics['epoch']), label='dataset-wide unique bin visit', color='black', linestyle='dotted')
+        ax.hlines(y=total_cand_diversity, xmin=0, xmax=np.max(train_metrics['epoch']), label='dataset-wide unique candidate visit', color='black', linestyle='dotted')
         ax.legend(fontsize=12)
         fig.tight_layout()
-        fig.savefig(run_paths.figures / 'unique_bins_history.png')
+        fig.savefig(run_paths.figures / 'unique_candidates_history.png')
 
     if 'lr' in train_metrics.keys():       
         fig, ax = plt.subplots()
@@ -125,24 +124,24 @@ def plot_global_feature_distributions(dataset, fig_outdir):
     fig.tight_layout()
     fig.savefig(fig_outdir / 'train_global_feature_distributions.png')
     
-def plot_bin_feature_distributions(dataset, fig_outdir):
+def plot_candidate_feature_distributions(dataset, fig_outdir):
     ncols = 5
-    nrows = len(dataset.bin_feature_names) // ncols + 1
+    nrows = len(dataset.candidate_feature_names) // ncols + 1
     fig = plt.figure(figsize=(ncols * 4, nrows * 3))
 
-    bs_np = dataset.bin_states.cpu().numpy()
-    sm_np = dataset.bin_sentinel_mask.cpu().numpy() 
-    
-    for i, feat_name in enumerate(dataset.bin_feature_names):
+    cs_np = dataset.candidate_states.cpu().numpy()
+    sm_np = dataset.candidate_sentinel_mask.cpu().numpy()
+
+    for i, feat_name in enumerate(dataset.candidate_feature_names):
         ax = fig.add_subplot(nrows, ncols, i+1)
-        feat = bs_np[..., i].copy()
+        feat = cs_np[..., i].copy()
         feat[sm_np[..., i]] = np.nan  # mask sentinels
         
         with np.errstate(all='ignore'):
             means = np.nanmean(feat, axis=1)                 # (T,)
             stds  = np.nanstd(feat,  axis=1)                 # (T,)
         
-        # Optional: hide timestamps where every bin is sentinel (means is NaN)
+        # Optional: hide timestamps where every candidate is sentinel (means is NaN)
         keep = np.isfinite(means)
         x = np.arange(len(means))
         
@@ -151,9 +150,9 @@ def plot_bin_feature_distributions(dataset, fig_outdir):
         ax.set_title(feat_name)
         ax.set_xlabel('timestep')
         ax.set_title(f"{feat_name}")
-    fig.suptitle(f" Bin features", fontsize=16)
+    fig.suptitle(f" Candidate features", fontsize=16)
     fig.tight_layout()
-    fig.savefig(fig_outdir / 'train_bin_feature_distributions.png')
+    fig.savefig(fig_outdir / 'train_candidate_feature_distributions.png')
     
 
     # most_common_bin = dataset._df['bin'].mode()[0]

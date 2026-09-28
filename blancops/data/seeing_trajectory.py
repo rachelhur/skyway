@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def _load_val_df(cache_path: Path) -> pd.DataFrame:
     """Load the split-night DataFrame from a ``<split>_dataset_cache.pt``.
 
-    Accepts both storage forms (plain dict and ``DatasetCache`` instance) and
+    Accepts both storage forms (plain dict and ``TransitionDatasetCache`` instance) and
     both key generations: ``split_df`` as written now, and ``val_df`` as
     written before the split rename.
 

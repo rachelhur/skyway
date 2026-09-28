@@ -1,12 +1,12 @@
 
 """Bin feature computation for both online (live) and offline (batch) pipelines.
- 
+
 The module-level helpers below define the canonical per-timestep computation.
 Both `BlancoEnv._calculate_bin_features` (live, 1 timestep) and
 `BinFeatureEngineer.transform` (offline, batch) drive these primitives — the
 offline pipeline writing per-step outputs into pre-allocated arrays for
 cache-friendliness.
- 
+
 Sentinel convention: inactive bins are marked with NaN internally during all
 intermediate computation (rel, cyclical, validate). `replace_nan_with_sentinel`
 converts NaN -> RADEC/AZEL_BIN_FEAT_SENTINEL (-1.0) at the very end, so
@@ -14,35 +14,38 @@ downstream consumers see the on-disk convention.
 
 To add a new feature:
     1. Implement in one of the appropriate canonical helpers:
-        - `compute_bin_ephemeris_features`
+        - `compute_candidate_ephemeris_features` (candidate_features.py, shared with fields)
         - `compute_bin_progress_features`
         - `apply_relative_bin_features`
-        - 'get_relative_feature'
+        - `get_relative_feature` (candidate_features.py, shared with fields)
     or add a new helper
     2. Add feature key to `BinFeatureEngineer._pre_allocate_arrays()`
-    3. Update _ALLOWED_NORMS_PER_FEATURE constant in configs/constants.py 
+    3. Update _ALLOWED_NORMS_PER_FEATURE constant in configs/constants.py
     4. Add feature key to _BIN_FEATURE_NAMES in configs/constants.py
     5. Add feature key and default normalization to _DEFAULT_NORM_MAPPING in configs/constants.py
-    
+
     If adding a new helper, must also update base_env.py `_calculate_bin_features`
     method and `BinFeatureEngineer.transform` method.
 """
 import warnings
- 
+
 import numpy as np
 from einops import rearrange
 from tqdm import tqdm
+from blancops.data.features.candidate_features import (
+    _INTERNAL_SENTINEL, compute_candidate_ephemeris_features, get_relative_feature,
+)
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.data.features.normalizations import apply_cyclical_features
 from blancops.ephemerides import ephemerides
 from blancops.configs.constants import *
- 
+
 import logging
 
 from blancops.survey.profiles import DES
 logger = logging.getLogger(__name__)
- 
- 
+
+
 # History-feature base names that this pipeline knows about. Any
 # requested feature whose name contains one of these substrings will
 # trigger the history pass.
@@ -52,85 +55,21 @@ _SURVEY_PROGRESS_BASE_KEYS = [
         'min_tiling',
     ]
 _STALENESS_BASE_KEYS = ['t_since_last_visit']
-_INTERNAL_SENTINEL = np.nan
 
 # Sun-elevation horizon (degrees) is used to define night duration in seconds
-# Currently defined to match the value used in 
-# `data/preprocessing `build_DES_lookups()` so that night2ot_clock_seconds 
+# Currently defined to match the value used in
+# `data/preprocessing `build_DES_lookups()` so that night2ot_clock_seconds
 # is consistent. This param is used by features:
 # `t_until_set` and *can* be used by `t_since_last_visit` (not advised).
 _SUN_EL_LIMIT_DEG = DES.sun_el_limit
 
- 
+
 # ============================================================================
 # Canonical per-timestep helpers — single source of truth, shared between
 # BinFeatureEngineer (offline batch) and BlancoEnv (live single-step).
 # ============================================================================
- 
- 
-def compute_bin_ephemeris_features(timestamp, pointing_radec, hpGrid, night_duration_in_sec):
-    """Per-timestep ephemeris features for all bins on the hpGrid.
- 
-    Returns a dict with keys: ``ra``, ``dec``, ``az``, ``el``, ``ha``,
-    ``airmass``, ``moon_distance``, ``sun_distance``, ``pointing_distance``,
-    ``delta_az``, ``delta_el``, ``time_till_set`` — each a length-``nbins`` array.
- 
-    ``pointing_radec`` is ``(ra, dec)`` in radians. ``delta_az``/``delta_el``
-    are always in true topographic coords regardless of ``hpGrid.is_azel``;
-    this fixes a subtle bug in the previous offline pipeline that passed
-    ``(ra, dec)`` to ``get_delta_az_el`` when the grid was RaDec, producing
-    delta_ra / delta_dec mislabeled as delta_az / delta_el.
-    """
-    features = {}
-    lon, lat = hpGrid.lon, hpGrid.lat
- 
-    if hpGrid.is_azel:
-        ra, dec = ephemerides.topographic_to_equatorial(
-            az=lon, el=lat, time=timestamp
-        )
-        features['az'], features['el'] = lon, lat
-        features['ra'], features['dec'] = ra, dec
-        pointing_az, pointing_el = ephemerides.equatorial_to_topographic(
-            ra=pointing_radec[0], dec=pointing_radec[1], time=timestamp
-        )
-        pointing_in_grid = (pointing_az, pointing_el)
-    else:
-        az, el = ephemerides.equatorial_to_topographic(
-            ra=lon, dec=lat, time=timestamp
-        )
-        features['ra'], features['dec'] = lon, lat
-        features['az'], features['el'] = az, el
-        pointing_az, pointing_el = ephemerides.equatorial_to_topographic(
-            ra=pointing_radec[0], dec=pointing_radec[1], time=timestamp
-        )
-        pointing_in_grid = pointing_radec
- 
-    features['ha'] = hpGrid.get_hour_angle(time=timestamp)
-    features['airmass'] = hpGrid.get_airmass(timestamp)
-    features['moon_distance'] = hpGrid.get_source_angular_separations(
-        'moon', time=timestamp
-    )
-    features['sun_distance'] = hpGrid.get_source_angular_separations(
-        'sun', time=timestamp
-    )
-    features['pointing_distance'] = hpGrid.get_angular_separations(
-        lon=pointing_in_grid[0], lat=pointing_in_grid[1]
-    )
-    features['delta_az'], features['delta_el'] = get_delta_az_el(
-        features['az'], features['el'], pointing_az, pointing_el
-    )
-    t_until_set_raw = hpGrid.get_time_until_set(time=timestamp)
-    # The above method outputs np.inf. Convert to NaN.
-    # This will be handled by StateNormalizer at the end of its pipeline. 
-    features['t_until_set'] = np.where(
-        np.isfinite(t_until_set_raw), 
-        t_until_set_raw / night_duration_in_sec,
-        _INTERNAL_SENTINEL
-        
-    )
-    return features
- 
- 
+
+
 def compute_bin_progress_features(
     current_counts,
     target_counts,
@@ -144,11 +83,11 @@ def compute_bin_progress_features(
     t_since_last_visit_divisor=None
 ):
     """Per-timestep survey-progress features per bin.
- 
+
     Inactive bins (no in-plan fields contributing) are marked with NaN.
     The caller is responsible for converting NaN -> external sentinel via
     ``replace_nan_with_sentinel`` at the end of the pipeline.
- 
+
     Args
     ====
     current_counts: ``(nfields,)`` for non-filter or ``(nfields, nfilters)``
@@ -166,12 +105,12 @@ def compute_bin_progress_features(
     last_visit_timestamps:
     t_since_last_visit_divisor:
 
- 
+
     Returns:
         dict with ``num_unvisited_fields``,
         ``num_incomplete_fields``, ``min_tiling`` (always)
         and per-filter variants if ``do_filt``.
- 
+
     Note on normalization: the "adjusted max" used in ratios is
     ``max(current_at_this_step, target)``, matching the live env. This differs
     from the legacy offline computation which precomputed
@@ -180,10 +119,10 @@ def compute_bin_progress_features(
     """
     if t_since_last_visit_divisor is None:
         t_since_last_visit_divisor = 1
-            
+
     if idx2filter is None:
         idx2filter = IDX2FILTER
- 
+
     if do_filt and current_counts.ndim != 2:
         raise ValueError(
             f"do_filt=True requires 2D current_counts; got shape "
@@ -194,10 +133,10 @@ def compute_bin_progress_features(
             f"current_counts shape {current_counts.shape} != target_counts "
             f"shape {target_counts.shape}"
         )
-    
+
     features = {}
     bins_mem = bins_per_field[v_mask].astype(np.int32)
- 
+
     # Aggregate per-field counts (sum over filters for the 1D family of features)
     if current_counts.ndim == 2:
         cur_field_vis = current_counts.sum(axis=1)
@@ -205,18 +144,18 @@ def compute_bin_progress_features(
     else:
         cur_field_vis = current_counts
         tgt_field_vis = target_counts
- 
+
     v_cur_field = cur_field_vis[v_mask]
     v_tgt_field = tgt_field_vis[v_mask]
     in_plan = v_tgt_field > 0
     max_adj = np.maximum(v_cur_field, v_tgt_field)
- 
+
     # Active bins: bins that contain at least one in-plan field
     bin_in_plan_counts = np.bincount(
         bins_mem, weights=in_plan, minlength=nbins
     )
     act_s = bin_in_plan_counts > 0
- 
+
     def _assign_staleness(last_visit_per_field, in_plan_mask, key):
         """Per-bin staleness = freshest in-plan field's age, OT-normalized if provided.
 
@@ -244,14 +183,14 @@ def compute_bin_progress_features(
         num = np.bincount(bins_mem, weights=field_mask, minlength=nbins)
         np.divide(num, bin_in_plan_counts, out=res, where=act_s)
         features[key] = res
- 
+
     _assign_fraction(
         (v_cur_field == 0) & in_plan, "num_unvisited_fields"
     )
     _assign_fraction(
         (v_cur_field < max_adj) & in_plan, "num_incomplete_fields"
     )
- 
+
     # Per-bin min tiling. Out-of-plan fields contribute +inf so they're ignored
     # by np.minimum.at; bins with no in-plan fields stay +inf and are converted
     # to NaN at the end.
@@ -265,7 +204,7 @@ def compute_bin_progress_features(
     np.minimum.at(s_mins, bins_mem, tiling)
     s_mins[~act_s | np.isinf(s_mins)] = _INTERNAL_SENTINEL
     features["min_tiling"] = np.minimum(s_mins, 1.0)
- 
+
     if not do_filt:
         if timestamp is not None and last_visit_timestamps is not None:
             if last_visit_timestamps.ndim == 2:
@@ -286,7 +225,7 @@ def compute_bin_progress_features(
                 "t_since_last_visit",
             )
         return features
- 
+
     # Per-filter family of features
     nfilters = current_counts.shape[1]
     v_cur_ff = current_counts[v_mask]
@@ -336,13 +275,13 @@ def compute_bin_progress_features(
         s_f_mins[~act_f | np.isinf(s_f_mins)] = _INTERNAL_SENTINEL
         features[f"min_tiling_{filt_name}"] = np.minimum(s_f_mins, 1.0)
     return features
- 
- 
+
+
 def apply_relative_bin_features(features, el_mask, has_historical, do_filt):
     """Add ``rel_*`` features in place. Works on ``(nbins,)`` or batched
     ``(..., nbins)`` arrays — the relative subtraction operates on the
     trailing axis via ``np.nanmean``.
- 
+
     NaN values (inactive bins) propagate correctly: they're excluded from
     the local mean and stay NaN in the rel output.
     """
@@ -350,10 +289,10 @@ def apply_relative_bin_features(features, el_mask, has_historical, do_filt):
         features['rel_ha'] = get_relative_feature(features['ha'], el_mask)
     if 'moon_distance' in features:
         features['rel_moon_distance'] = get_relative_feature(features['moon_distance'], el_mask)
- 
+
     if not has_historical:
         return
-    
+
     if do_filt:
         base_keys = _SURVEY_PROGRESS_BASE_KEYS + _STALENESS_BASE_KEYS
         keys = [f"{bk}_{filt}" for bk in base_keys for filt in FILTER2IDX.keys()]
@@ -362,23 +301,23 @@ def apply_relative_bin_features(features, el_mask, has_historical, do_filt):
     for k in keys:
         if k in features:
             features[f"rel_{k}"] = get_relative_feature(features[k], el_mask)
- 
- 
+
+
 def validate_history_bin_features(features, do_filt, idx2filter=None):
     """Sanity-check history features. NaN-aware (NaN = inactive bin).
-    
+
     Does not check mean_tiling
- 
+
     Raises ``RuntimeError`` on:
       * Bounds: fractions outside [0, 1]
       * Subset rule: unvisited > incomplete
       * Tiling floor: unvisited > 0 in a bin where min_tiling > 0
- 
+
     Works on ``(nbins,)`` or batched ``(n_timestamps, nbins)`` arrays.
     """
     if idx2filter is None:
         idx2filter = IDX2FILTER
- 
+
     check_groups = [{
         'unv': 'num_unvisited_fields',
         'inc': 'num_incomplete_fields',
@@ -393,17 +332,17 @@ def validate_history_bin_features(features, do_filt, idx2filter=None):
                 'til': f'min_tiling_{filt_name}',
                 'name': f'survey ({filt_name})',
             })
- 
+
     for grp in check_groups:
         unv_k, inc_k, til_k = grp['unv'], grp['inc'], grp['til']
         if not all(k in features for k in (unv_k, inc_k, til_k)):
             continue
         unv, inc, til = features[unv_k], features[inc_k], features[til_k]
- 
+
         v_unv = ~np.isnan(unv)
         v_inc = ~np.isnan(inc)
         v_til = ~np.isnan(til)
- 
+
         # 1. Bounds [0, 1]
         bad_unv = v_unv & ((unv < 0.0) | (unv > 1.0))
         if np.any(bad_unv):
@@ -419,7 +358,7 @@ def validate_history_bin_features(features, do_filt, idx2filter=None):
                 f"FATAL BOUNDS: {inc_k} out of [0,1] at idx {bad[0][0]}. "
                 f"Val: {inc[bad][0]}"
             )
- 
+
         # 2. Subset rule: unvisited <= incomplete
         both = v_unv & v_inc
         subset_violation = both & (unv > (inc + 1e-5))
@@ -429,7 +368,7 @@ def validate_history_bin_features(features, do_filt, idx2filter=None):
                 f"FATAL LOGIC LEAK: {grp['name']} unvisited > incomplete at "
                 f"idx {bad[0][0]}. Unv: {unv[bad][0]}, Inc: {inc[bad][0]}"
             )
- 
+
         # 3. Tiling floor: unvisited > 0 implies min_tiling == 0
         both_til = v_unv & v_til
         has_unv = unv > 1e-5
@@ -463,7 +402,7 @@ def validate_history_bin_features(features, do_filt, idx2filter=None):
                 f"FATAL BOUNDS: {bk} out of [0,1] at idx {b[0][0]}. "
                 f"Val: {arr[b][0]}"
             )
-                
+
 
 # Keep just in case. Remove when StateNormalizer.fit_transform() is confidently implemented.
 # def replace_nan_with_sentinel(features, sentinel_val, keys=None):
@@ -480,7 +419,7 @@ def validate_history_bin_features(features, do_filt, idx2filter=None):
 #         nan_mask = np.isnan(arr)
 #         if nan_mask.any():
 #             arr[nan_mask] = sentinel_val
-            
+
 def replace_invalid_with_sentinel(features, sentinel_val, keys=None):
     """Convert NaN and ±inf -> ``sentinel_val`` in place for the given keys
     (or every key if ``keys`` is None). Only writes when an invalid value
@@ -499,54 +438,27 @@ def replace_invalid_with_sentinel(features, sentinel_val, keys=None):
         bad = ~np.isfinite(arr)
         if bad.any():
             arr[bad] = sentinel_val
- 
- 
-# ============================================================================
-# Small math helpers — used by callers across the codebase, kept module-level.
-# ============================================================================
- 
- 
-def get_relative_feature(feat_arr, el_mask):
-    """Subtract the per-timestep mean (over above-horizon bins) from
-    ``feat_arr``. NaN-aware: NaN values are excluded from the mean and
-    stay NaN in the output.
-    """
-    valid_cols = np.where(el_mask, feat_arr, np.nan)
-    with warnings.catch_warnings():
-        # nanmean over an all-NaN slice warns and returns NaN — that's fine.
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        local_mean = np.nanmean(valid_cols, axis=-1, keepdims=True)
-    return feat_arr - local_mean
- 
- 
-def get_delta_az_el(bin_azs, bin_els, target_az, target_el):
-    """Angular differences. ``az`` is wrapped to ``[-π, π)``; ``el`` is
-    naive subtraction (elevation isn't periodic in the relevant range).
-    """
-    azs = (bin_azs - target_az + np.pi) % (2 * np.pi) - np.pi
-    els = bin_els - target_el
-    return azs, els
- 
- 
+
+
 # ============================================================================
 # BinFeatureEngineer — offline batch pipeline, driven by the helpers above.
 # ============================================================================
- 
- 
+
+
 class BinFeatureEngineer:
     """Offline batch feature engineering.
- 
+
     Drives the shared per-timestep helpers in a tight row loop, writing
     outputs into pre-allocated ``(n_timestamps, n_bins)`` arrays for
     cache-friendliness. Cyclical, relative, validation, and sentinel
     conversion run once over the full batch at the end.
     """
- 
+
     # How often (in seconds) to refresh field->bin mapping in AzEl mode.
     # The sky rotates ~0.25 deg / min, so 5 minutes (~1.25 deg) is well
     # under typical healpix bin sizes for the surveys we run.
     _AZEL_CACHE_REFRESH_S = 300
- 
+
     def __init__(
         self,
         hpGrid,
@@ -574,11 +486,11 @@ class BinFeatureEngineer:
         self.sentinel_val = (
             AZEL_BIN_FEAT_SENTINEL if self.is_azel else RADEC_BIN_FEAT_SENTINEL
         )
- 
- 
+
+
     def transform(self, pt_df, requested_features) -> np.ndarray:
         """Run the full pipeline and return a ``(nrows, nbins, nfeats)`` tensor.
- 
+
         ``requested_features`` controls the final stack order; any feature
         name there must be produced by the pipeline (or appear after rel/
         cyclical expansion).
@@ -586,29 +498,29 @@ class BinFeatureEngineer:
         timestamps = pt_df['timestamp'].values
         assert all(np.diff(timestamps) > 0), \
             "Timestamps must be strictly increasing."
- 
+
         ntimestamps = len(timestamps)
         nbins = len(self.hpGrid.idx_lookup)
- 
+
         features = self._pre_allocate_arrays(ntimestamps, nbins)
- 
+
         # Per-timestep core: drives the shared helpers, writes into pre-allocated arrays.
         self._fill_features_per_timestep(features, pt_df)
- 
+
         # Once-over post-processing on the batched arrays. el_mask is
         # broadcast-shaped (n_t, n_b); rel/validate work on the trailing axis.
         el_mask = features['el'] > 0
- 
+
         if self.do_local_mean_z_score:
             apply_relative_bin_features(
                 features, el_mask, self.has_historical, self.do_filt
             )
- 
+
         if self.do_cyclical_norm:
             apply_cyclical_features(
                 features, self.base_features, self.cyclical_features
             )
- 
+
         if self.has_historical:
             validate_history_bin_features(features, self.do_filt)
 
@@ -617,11 +529,11 @@ class BinFeatureEngineer:
         # downstream plotting), not here.
 
         return self._stack_and_rearrange(features, requested_features)
- 
- 
+
+
     def _pre_allocate_arrays(self, ntimestamps, nbins):
         """Allocate the ``(n_t, n_b)`` arrays we'll fill in the row loop.
- 
+
         We pre-allocate every key the shared ephemeris helper produces,
         plus history keys when needed. The shared helpers always produce
         the full ephemeris set per timestep; pre-allocating all of them
@@ -645,26 +557,26 @@ class BinFeatureEngineer:
                             shape, np.nan, dtype=np.float32
                         )
         return features
- 
- 
+
+
     def _fill_features_per_timestep(self, features, pt_df):
         """Drive the shared helpers for each row, writing into ``features``.
- 
+
         Iterates rows via ``pt_df.groupby('night', sort=False)``. This is
         what the original implementation did and we keep it for two reasons:
- 
+
           1. The groupby key is the same pandas Timestamp the upstream
              code used to build ``night2{fid,fidfilt}_visit_hist``, so the
              dict lookup is type-safe. (Going through ``pt_df['night'].values``
              gives ``numpy.datetime64`` instead, which won't match.)
           2. Night boundaries are implicit in the iteration, so we don't
              need separate "did the night change?" bookkeeping.
- 
+
         With timestamps strictly increasing (asserted in ``transform``) and
         ``sort=False``, groups iterate in row order, so the global counter
         ``i`` matches each row's slot in the pre-allocated arrays.
- 
-        Features at row i reflect counts from rows 0..i-1, 
+
+        Features at row i reflect counts from rows 0..i-1,
         i.e., the world state before the observation at row i was made
 
         OT-clock handling: ``last_visit_*_ot`` and ``timestamp`` passed to
@@ -675,16 +587,16 @@ class BinFeatureEngineer:
         OT anchor.
         """
         nbins = len(self.hpGrid.idx_lookup)
- 
+
         # Cheap path: ephemeris only.
         if not self.has_historical:
             self._fill_ephemeris_only(features, pt_df)
             return
- 
+
         # History path setup.
         ra_arr = self.lookups.fields['ra'].to_numpy()
         dec_arr = self.lookups.fields['dec'].to_numpy()
- 
+
         # Map filter strings to indices once for the whole frame; we then
         # index per-group inside the loop.
         filt_idx_full = (
@@ -693,7 +605,7 @@ class BinFeatureEngineer:
             .to_numpy()
         )
         pt_df_with_filt = pt_df.assign(_filt_idx=filt_idx_full)
- 
+
         # RaDec: field->bin mapping is static for the whole run.
         if self.is_azel:
             bins_static, vmask_static = None, None
@@ -704,7 +616,7 @@ class BinFeatureEngineer:
                 dtype=np.int32,
             )
             vmask_static = bins_static != ZENITH_BIN_NUM
- 
+
         # AzEl cache, persisted across groups so a night boundary doesn't
         # invalidate a still-fresh field->bin assignment.
         cache_time = -1e9
@@ -774,17 +686,17 @@ class BinFeatureEngineer:
                 obs_t = ot_at_sunset + (t - sunset_ts)
 
                 # --- Ephemeris (always) ---
-                eph = compute_bin_ephemeris_features(
+                eph = compute_candidate_ephemeris_features(
                     timestamp=t,
                     pointing_radec=(step_pointing_ras[j], step_pointing_decs[j]),
-                    hpGrid=self.hpGrid,
+                    grid=self.hpGrid,
                     night_duration_in_sec=step_night_duration_sec
                 )
-                
+
                 for k, v in eph.items():
                     if k in features:
                         features[k][i] = v
- 
+
                 # --- Field->bin mapping (static for RaDec, cached for AzEl) ---
                 if self.is_azel:
                     if abs(t - cache_time) > self._AZEL_CACHE_REFRESH_S:
@@ -802,7 +714,7 @@ class BinFeatureEngineer:
                     bpf, vm = cache_bins, cache_vmask
                 else:
                     bpf, vm = bins_static, vmask_static
- 
+
                 # --- History features via shared helper ---
                 if self.do_filt:
                     hist = compute_bin_progress_features(
@@ -841,7 +753,7 @@ class BinFeatureEngineer:
 
                 i += 1
                 pbar.update(1)
- 
+
         pbar.close()
         # Sanity: every pre-allocated row should have been written.
         assert i == len(pt_df), (
@@ -883,21 +795,21 @@ class BinFeatureEngineer:
             ras = group['ra'].to_numpy()
             decs = group['dec'].to_numpy()
             for j in range(len(group)):
-                eph = compute_bin_ephemeris_features(
+                eph = compute_candidate_ephemeris_features(
                     timestamp=ts[j],
                     pointing_radec=(ras[j], decs[j]),
-                    hpGrid=self.hpGrid,
+                    grid=self.hpGrid,
                     night_duration_in_sec=night_duration_sec,
                 )
                 for k, v in eph.items():
                     if k in features:
                         features[k][i] = v
                 i += 1
- 
+
     # ------------------------------------------------------------------
     # Stacking
     # ------------------------------------------------------------------
- 
+
     def _stack_and_rearrange(self, features, requested_features) -> np.ndarray:
         """Pop requested arrays, validate they exist, reshape via einops."""
         final_arrays = []
@@ -907,7 +819,7 @@ class BinFeatureEngineer:
                     f"Requested feature '{key}' was not calculated by the pipeline."
                 )
             final_arrays.append(features.pop(key))
- 
+
         assert len(final_arrays) == len(requested_features)
         bin_states = np.array(final_arrays)
         return rearrange(

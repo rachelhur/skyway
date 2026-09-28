@@ -40,8 +40,8 @@ class StateValueMLP(nn.Module):
     ----------
     glob_dim : int
         Global state dimension D_glob.
-    bin_dim : int
-        Flattened candidate state dimension n_candidates * D_candidate; 0 when there are none.
+    cand_dim : int
+        Flattened candidate state dimension n_candidates * D_cand; 0 when there are none.
     hidden : tuple[int, ...]
         Hidden layer widths.
     layernorm : bool
@@ -50,40 +50,40 @@ class StateValueMLP(nn.Module):
         Activation class.
     """
 
-    def __init__(self, glob_dim: int, bin_dim: int, hidden: tuple[int, ...],
+    def __init__(self, glob_dim: int, cand_dim: int, hidden: tuple[int, ...],
                  layernorm: bool = True, activation: type[nn.Module] = nn.ReLU):
         super().__init__()
-        self.bin_dim = bin_dim
-        self.net = build_mlp(glob_dim + bin_dim, hidden, 1, layernorm, activation)
+        self.cand_dim = cand_dim
+        self.net = build_mlp(glob_dim + cand_dim, hidden, 1, layernorm, activation)
 
-    def forward(self, x_glob: torch.Tensor, x_bin: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_glob: torch.Tensor, x_cand: torch.Tensor) -> torch.Tensor:
         """Predict V(s).
 
         Parameters
         ----------
         x_glob : torch.Tensor
             Global state, shape (batch, D_glob).
-        x_bin : torch.Tensor
-            Bin states, shape (batch, n_bins, D_bin); ignored when bin_dim == 0.
+        x_cand : torch.Tensor
+            Candidate states, shape (batch, n_candidates, D_cand); ignored when cand_dim == 0.
 
         Returns
         -------
         torch.Tensor
             State value, shape (batch, 1).
         """
-        if self.bin_dim > 0:
-            x_glob = torch.cat([x_glob, x_bin.flatten(start_dim=1)], dim=1)  # [batch, D_glob + n_bins * D_bin]
+        if self.cand_dim > 0:
+            x_glob = torch.cat([x_glob, x_cand.flatten(start_dim=1)], dim=1)  # [batch, D_glob + n_candidates * D_cand]
         return self.net(x_glob)
 
 class ContextualScoreMLP(nn.Module):
     """
     Scores each candidate from [encoded global state, candidate features].
 
-    Candidates are the rows of `x_bin`: HEALPix bins for bin action spaces, survey fields for field_filter.
+    Candidates are the rows of `x_cand`: HEALPix bins for bin action spaces, survey fields for field_filter.
     Rows are scored independently, so any number of candidates is accepted.
     """
 
-    def __init__(self, global_dim: int, bin_feat_dim: int,
+    def __init__(self, global_dim: int, cand_feat_dim: int,
                  hidden_dim: int = 256,
                  nlayers: int = 2,
                  score_dim: int = 1,
@@ -110,36 +110,36 @@ class ContextualScoreMLP(nn.Module):
         # --- contextual gating (candidate feats, conditioned on g) ------------
         if use_contextual_gating:
             self.gate_net = nn.Sequential(
-                nn.Linear(g_dim, bin_feat_dim),
+                nn.Linear(g_dim, cand_feat_dim),
                 nn.Sigmoid(),
             )
 
         # --- shared per-candidate scorer -------------------------------------
         self.net = build_mlp(
-            g_dim + bin_feat_dim, hidden, score_dim,
+            g_dim + cand_feat_dim, hidden, score_dim,
             layernorm=layernorm, activation=activation,
         )
 
-    def forward(self, x_glob, x_bin):
-        batch_size, n_bins, _ = x_bin.shape
+    def forward(self, x_glob, x_cand):
+        batch_size, n_cands, _ = x_cand.shape
 
         # encode global state once, then expand across candidates
         g = x_glob if self.global_encoder is None else self.global_encoder(x_glob)
         g = g.unsqueeze(1)                       # (batch, 1, g_dim)
-        g_exp = g.expand(-1, n_bins, -1)         # (batch, n_bins, g_dim)
- 
+        g_exp = g.expand(-1, n_cands, -1)        # (batch, n_cands, g_dim)
+
         if self.use_contextual_gating:
             gate_mask = self.gate_net(g_exp)
-            x_bin = x_bin * gate_mask
+            x_cand = x_cand * gate_mask
 
-        x = torch.cat((g_exp, x_bin), dim=-1)    # (batch, n_bins, g_dim + bin_dim)
+        x = torch.cat((g_exp, x_cand), dim=-1)   # (batch, n_cands, g_dim + cand_feat_dim)
         scores = self.net(x)
         joint_action_scores = scores.view(batch_size, -1)
         return joint_action_scores
 
 
 class DualStreamMLP(nn.Module):
-    def __init__(self, global_dim, bin_feat_dim, hidden_dim, score_dim=1, activation=None,
+    def __init__(self, global_dim, cand_feat_dim, hidden_dim, score_dim=1, activation=None,
                  use_layer_norm=True):
         super().__init__()
         self.activation = nn.LeakyReLU if activation is None else activation
@@ -148,27 +148,27 @@ class DualStreamMLP(nn.Module):
             nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity(),
             self.activation()
         )
-        self.bin_enc = nn.Sequential(
-            nn.Linear(bin_feat_dim, hidden_dim),
+        self.cand_enc = nn.Sequential(
+            nn.Linear(cand_feat_dim, hidden_dim),
             nn.LayerNorm(hidden_dim) if use_layer_norm else nn.Identity(),
             self.activation()
         )
         self.net = build_mlp(hidden_dim * 2, (hidden_dim,), score_dim,
                              layernorm=use_layer_norm, activation=self.activation)
 
-    def forward(self, x_glob, x_bin):
-        batch_size, n_bins, _ = x_bin.shape
+    def forward(self, x_glob, x_cand):
+        batch_size, n_cands, _ = x_cand.shape
 
-        # 1. Process independently
+        # Process independently
         g_emb = self.glob_enc(x_glob)
-        g_emb = g_emb.unsqueeze(1).expand(-1, n_bins, -1) # Shape: (Batch, Bins, Hidden)
+        g_emb = g_emb.unsqueeze(1).expand(-1, n_cands, -1) # Shape: (Batch, Candidates, Hidden)
 
-        b_emb = self.bin_enc(x_bin) # Shape: (Batch, Bins, Hidden)
+        c_emb = self.cand_enc(x_cand) # Shape: (Batch, Candidates, Hidden)
 
-        # 2. Fuse deep in the network
-        fused = torch.cat([g_emb, b_emb], dim=-1) # Shape: (Batch, Bins, Hidden * 2)
+        # Fuse deep in the network
+        fused = torch.cat([g_emb, c_emb], dim=-1) # Shape: (Batch, Candidates, Hidden * 2)
 
-        # 3. Output scores
+        # Output scores
         scores = self.net(fused)
         return scores.view(batch_size, -1)
 
@@ -220,9 +220,9 @@ class AutoregressiveNet(nn.Module):
             self.action_heads.append(nn.Linear(input_dim, action_dims[i]))
 
 
-    def forward(self, x_glob, x_bin, action_mask, action=None):
+    def forward(self, x_glob, x_cand, action_mask, action=None):
         # GET LATENT SPACE REPRESENTATION
-        x_latent = self.state_encoder(x_glob, x_bin)
+        x_latent = self.state_encoder(x_glob, x_cand)
 
         pred_actions = []
         log_probs = []

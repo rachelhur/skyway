@@ -3,16 +3,21 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
+import dataclasses
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional, Tuple
 from tqdm import tqdm
 
 import torch
 from torch.utils.data import DataLoader, Subset, RandomSampler
 
 from blancops.configs.enums import RewardTerm
-from blancops.configs.experiment_schema import RLAlgConfig
+from blancops.configs.experiment_schema import ExperimentConfig, RLAlgConfig
+from blancops.data.feature_cache import BinFeatureCache, FieldFeatureCache
+from blancops.data.lookup_tables import LookupTables
 from blancops.data.norm_stats import NormStats
 from blancops.data.rewards import combine_rewards, normalize_rewards, reward_norm_stats
 from blancops.ephemerides import ephemerides
@@ -32,27 +37,27 @@ from blancops.data.features.field_features import FieldGrid, build_field_normali
 logger = logging.getLogger(__name__)
 
 
-# Chunk size for OOM-safe bin feature gathering
-_BIN_GATHER_CHUNK = 1024
+# Chunk size for OOM-safe candidate feature gathering
+_GATHER_CHUNK = 1024
 
 
-def _gather_bin_features(bin_features, rows, cols):
-    """Read selected rows and feature columns of a bin-feature array in chunks.
+def _gather_candidate_features(candidate_features, rows, cols):
+    """Read selected rows and feature columns of a candidate-feature array in chunks.
 
     Args:
-        bin_features: (n_rows, n_bins, n_all_feats) array or memmap.
+        candidate_features: (n_rows, n_candidates, n_all_feats) array or memmap.
         rows: Row indices to gather.
         cols: Feature-column indices to keep.
 
     Returns:
-        (len(rows), n_bins, len(cols)) float32 array.
+        (len(rows), n_candidates, len(cols)) float32 array.
     """
     rows = np.asarray(rows)
-    n_bins = bin_features.shape[1]
-    out = np.empty((len(rows), n_bins, len(cols)), dtype=np.float32)
-    for start in range(0, len(rows), _BIN_GATHER_CHUNK):
-        chunk_rows = rows[start:start + _BIN_GATHER_CHUNK]
-        out[start:start + len(chunk_rows)] = bin_features[chunk_rows][:, :, cols]
+    n_candidates = candidate_features.shape[1]
+    out = np.empty((len(rows), n_candidates, len(cols)), dtype=np.float32)
+    for start in range(0, len(rows), _GATHER_CHUNK):
+        chunk_rows = rows[start:start + _GATHER_CHUNK]
+        out[start:start + len(chunk_rows)] = candidate_features[chunk_rows][:, :, cols]
     return out
 
 
@@ -149,24 +154,237 @@ class OfflineDataset:
 
 
 # ---------------------------------------------------------------------------
+# TransitionDatasetCache -- frozen, normalized TransitionDataset for one split
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TransitionDatasetCache:
+    """Post-normalization tensors for one split's nights.
+
+    Built after a training run fixes the night split and normalization stats.
+    Saved as ``outdir/checkpoints/<split>_dataset_cache.pt`` (``torch.save``).
+
+    Exposes the same attributes queried by the evaluator infrastructure
+    (``DataContainer``, ``SingleStepEvaluator``) so it can be used as a
+    drop-in replacement for ``TransitionDataset`` in those paths.
+    """
+
+    # Normalized state tensors (val states only)
+    states: torch.Tensor
+    candidate_states: Optional[torch.Tensor]  # None when no candidate features
+    action_masks: torch.Tensor
+    active_candidate_mask: Optional[torch.Tensor]  # None when no candidate features
+
+    # Per-transition tensors
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    dones: torch.Tensor
+    slew_distances: torch.Tensor
+
+    # Compact indices into val-state tensors
+    curr_compact_idxs: np.ndarray
+    next_compact_idxs: np.ndarray
+
+    # Original (local-to-val-df) state indices — needed by DataContainer for
+    # night-boundary detection and _df.iloc[] access
+    current_state_idxs: np.ndarray
+    next_state_idxs: np.ndarray
+    state_idxs: np.ndarray
+
+    # Split-night DataFrame (all enriched columns, split nights only, local index)
+    split_df: pd.DataFrame
+
+    # Metadata
+    global_feature_names: List[str]
+    candidate_feature_names: List[str]
+    dataset_dims: dict
+    split_nights: List[str]
+    nside: int
+    is_azel: bool
+    split: str = 'val'
+    # Field centers (RA, Dec) for field_filter datasets, whose candidates are fields; None for bin datasets
+    field_radec: Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------
+    # Properties for evaluator compatibility
+    # ------------------------------------------------------------------
+
+    @property
+    def _df(self) -> pd.DataFrame:
+        return self.split_df
+
+    @property
+    def val_df(self) -> pd.DataFrame:
+        return self.split_df
+
+    @property
+    def val_nights(self) -> List[str]:
+        return self.split_nights
+
+    @property
+    def unique_nights(self):
+        return self.split_df['night'].unique()
+
+    @property
+    def _prenorm_candidate_states(self) -> Optional[torch.Tensor]:
+        # In TransitionDataset the prenorm array is normalized in-place, so
+        # _prenorm_candidate_states IS the normalized candidate_states after __init__.
+        return self.candidate_states
+
+    @property
+    def n_candidates(self) -> int:
+        return self.dataset_dims['num_candidates']
+
+    @property
+    def include_candidate_features(self) -> bool:
+        return self.candidate_states is not None
+
+    @property
+    def candidate_grid(self):
+        if self.field_radec is not None:
+            return FieldGrid(self.field_radec[0], self.field_radec[1])
+        return ephemerides.HealpixGrid(nside=self.nside, is_azel=self.is_azel)
+
+    # ------------------------------------------------------------------
+    # Construction from TransitionDataset
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_transition_dataset(cls, dataset, split: str = 'val') -> 'TransitionDatasetCache':
+        """Build from a ``TransitionDataset`` constructed on a single split's
+        feature cache. All transitions in the source dataset belong to
+        that split.
+
+        Args:
+            dataset: The source TransitionDataset.
+            split: Split name, 'val' or 'test'.
+
+        Returns:
+            The populated TransitionDatasetCache.
+        """
+        split_nights = dataset.night_split.nights_for(split)
+        return cls(
+            states=dataset.states,
+            candidate_states=dataset.candidate_states,
+            action_masks=dataset.action_masks,
+            active_candidate_mask=getattr(dataset, 'active_candidate_mask', None),
+            actions=dataset.actions,
+            rewards=dataset.rewards,
+            dones=dataset.dones,
+            slew_distances=dataset.slew_distances,
+            curr_compact_idxs=dataset.curr_compact_idxs,
+            next_compact_idxs=dataset.next_compact_idxs,
+            current_state_idxs=dataset.current_state_idxs,
+            next_state_idxs=dataset.next_state_idxs,
+            state_idxs=dataset.state_idxs,
+            split_df=dataset._df,
+            global_feature_names=dataset.global_feature_names,
+            candidate_feature_names=dataset.candidate_feature_names,
+            dataset_dims=dataset.dataset_dims,
+            split_nights=list(split_nights),
+            nside=dataset.candidate_grid.nside,
+            is_azel=dataset.candidate_grid.is_azel,
+            split=split,
+            field_radec=(np.array([dataset.candidate_grid.lon, dataset.candidate_grid.lat])
+                         if getattr(dataset, 'field_level', False) else None),
+        )
+
+    # ------------------------------------------------------------------
+    # Transition alignment
+    # ------------------------------------------------------------------
+
+    def to_transition_tensors(
+        self,
+        idxs: Optional[np.ndarray] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Expand the compact per-state tensors into per-transition rows. Used only
+        in run_explain.py for now.
+
+        Args:
+            idxs: transition indices to expand; None expands all. Subsetting
+                here, before the gather, keeps peak memory proportional to the
+                sample instead of the full transition set.
+
+        Returns:
+            global_obs     [n_transitions, n_global]
+            candidate_obs  [n_transitions, n_candidates, n_candidate_feats]
+            expert_actions [n_transitions]
+            valid_mask     [n_transitions, n_candidates * n_filters] bool
+        """
+        curr = torch.as_tensor(self.curr_compact_idxs, dtype=torch.long)
+        actions = self.actions.long()
+        if idxs is not None:
+            idxs = torch.as_tensor(idxs, dtype=torch.long)
+            curr = curr[idxs]
+            actions = actions[idxs]
+        return (
+            self.states[curr],               # [n_transitions, n_global]
+            self.candidate_states[curr] if self.candidate_states is not None else None,  # [n_transitions, n_candidates, n_candidate_feats]
+            actions,                         # [n_transitions]
+            self.action_masks[curr].bool(),  # [n_transitions, n_actions]
+        )
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # torch.save pickles non-tensor fields (DataFrame, lists, dicts)
+        torch.save(dataclasses.asdict(self), path)
+        logger.info(f"TransitionDatasetCache ({self.split}) saved to {path}")
+
+    @classmethod
+    def load(cls, path: Path) -> 'TransitionDatasetCache':
+        d = torch.load(path, weights_only=False)
+        # Restore numpy arrays from any tensors that torch.save may have converted
+        for key in ('curr_compact_idxs', 'next_compact_idxs',
+                    'current_state_idxs', 'next_state_idxs', 'state_idxs'):
+            if isinstance(d[key], torch.Tensor):
+                d[key] = d[key].numpy()
+        # Migrate caches written before the split rename
+        if 'val_df' in d:
+            d['split_df'] = d.pop('val_df')
+        if 'val_nights' in d:
+            d['split_nights'] = d.pop('val_nights')
+        d.setdefault('split', 'val')
+        # Migrate caches written before the bin -> candidate rename
+        for old, new in (('bin_states', 'candidate_states'), ('active_bin_mask', 'active_candidate_mask'),
+                         ('bin_feature_names', 'candidate_feature_names')):
+            if old in d:
+                d[new] = d.pop(old)
+        for old, new in (('bin_state_dim', 'candidate_state_dim'), ('num_bins', 'num_candidates')):
+            if old in d['dataset_dims']:
+                d['dataset_dims'][new] = d['dataset_dims'].pop(old)
+        if 'candidate_idx' not in d['split_df'].columns:
+            d['split_df']['candidate_idx'] = d['split_df']['bin']
+        return cls(**d)
+
+    @classmethod
+    def exists(cls, path: Path) -> bool:
+        return Path(path).exists()
+
+
+
+# ---------------------------------------------------------------------------
 # TransitionDataset — all heavy logic
 # ---------------------------------------------------------------------------
 
 class TransitionDataset(torch.utils.data.Dataset):
-    """Constructs and stores all RL transitions from a ``RawFeatureCache``.
+    """Constructs and stores all RL transitions from a ``BinFeatureCache`` or ``FieldFeatureCache``.
 
-    Accepts a pre-computed ``RawFeatureCache`` instead of a raw DataFrame so
-    feature engineering (i.e., heavy computation) is skipped.
-    Only normalization, reward/action/mask construction, and train/val/test splitting happen here.
+    Pre-computing performs heavy data-processing so various models can be run on a one-time-compute
+    dataset. Only normalization, reward/action/mask construction, and train/val/test splitting happen here.
     """
 
     def __init__(
         self,
-        cache,                  # RawFeatureCache; XXX why no type? circular import or forgot?
-        cfg=None,
-        lookups=None,
+        cache : BinFeatureCache | FieldFeatureCache,
+        cfg : ExperimentConfig = None,
+        lookups : LookupTables = None,
         norm_stats: NormStats | None = None,     # None: fit on this dataset's training transitions
-        split_role=None,
+        split_role : str | None = None,
         telescope: TelescopeProfile | None = None
     ):
         self._given_norm_stats = norm_stats
@@ -175,10 +393,10 @@ class TransitionDataset(torch.utils.data.Dataset):
         self._split_role = split_role
         self._setup_configuration(cfg, norm_kwargs)
         self.lookups = lookups
-        if self.field_level: # XXX change self.hpGrid to self.grid
-            self.hpGrid = FieldGrid(lookups.fields['ra'].to_numpy(), lookups.fields['dec'].to_numpy())
+        if self.field_level:
+            self.candidate_grid = FieldGrid(lookups.fields['ra'].to_numpy(), lookups.fields['dec'].to_numpy())
         else:
-            self.hpGrid = ephemerides.HealpixGrid(
+            self.candidate_grid = ephemerides.HealpixGrid(
                 nside=cfg.data.nside,
                 is_azel=grid_is_azel(cfg.data.action_space),
             )
@@ -203,12 +421,12 @@ class TransitionDataset(torch.utils.data.Dataset):
         self._drop_interrupted_transitions = getattr(cfg.data, 'drop_interrupted', False)
         self.reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
         self._calculate_action_mask = cfg.model.algorithm != 'bc' # expensive and not needed for bc
-        self.include_bin_features = len(cfg.data.bin_features) > 0
+        self.include_candidate_features = len(cfg.data.bin_features) > 0
 
         action_space = cfg.data.action_space
         self.num_filters = _NUM_FILTERS if has_filter(action_space) else 1
 
-        # num_actions resolved after nbins is known from cache
+        # num_actions resolved after n_candidates is known from cache
         self._action_space_str = action_space
         if action_space == 'filter':
             self.num_actions = self.num_filters
@@ -224,20 +442,20 @@ class TransitionDataset(torch.utils.data.Dataset):
         )
         self.base_global_feature_names = base_global
         self.base_bin_feature_names = base_bin
-        self.global_feature_names, self.bin_feature_names = setup_feature_names(
+        self.global_feature_names, self.candidate_feature_names = setup_feature_names(
             base_global,
             base_bin,
             norm_kwargs['cyclical_feature_names'],
             norm_kwargs['do_cyclical_norm'],
             do_filt=has_filter(action_space),
         )
-        self.do_local_mean_z_score = any('rel_' in name for name in self.bin_feature_names)
+        self.do_local_mean_z_score = any('rel_' in name for name in self.candidate_feature_names)
 
         # field_filter
         self.field_level = is_field_level(action_space)
         if self.field_level:
-            self.bin_feature_names = expand_field_feature_names(list(cfg.data.field_features))
-            self.include_bin_features = True
+            self.candidate_feature_names = expand_field_feature_names(list(cfg.data.field_features))
+            self.include_candidate_features = True
             self.do_local_mean_z_score = False
             constraints = ActionConstraints()
             self._airmass_limit = min(constraints.airmass_limit, constraints.airmass_failsafe)
@@ -256,10 +474,10 @@ class TransitionDataset(torch.utils.data.Dataset):
             if cache.field_features is None:
                 raise FileNotFoundError("field_filter needs field features in the cache; run "
                                         "`precompute-train-features --field_features`.")
-            missing_field = set(self.bin_feature_names) - set(cache.field_feature_names)
+            missing_field = set(self.candidate_feature_names) - set(cache.field_feature_names)
             assert not missing_field, f"Field features missing from cache: {missing_field}."
-        elif self.include_bin_features:
-            missing_bin = set(self.bin_feature_names) - set(cache.bin_feature_names)
+        elif self.include_candidate_features:
+            missing_bin = set(self.candidate_feature_names) - set(cache.bin_feature_names)
             assert not missing_bin, (
                 f"Bin features missing from cache: {missing_bin}. "
                 "Re-run precompute-features."
@@ -272,24 +490,28 @@ class TransitionDataset(torch.utils.data.Dataset):
             self._df = _overwrite_fwhm_with_causal(self._df, self._seeing_cfg)
 
         if self.field_level:
-            field_indices = [cache.field_feature_names.index(f) for f in self.bin_feature_names]
-            self._prenorm_bin_states = _gather_bin_features(cache.field_features, cache.state_idxs, field_indices)
+            field_indices = [cache.field_feature_names.index(f) for f in self.candidate_feature_names]
+            self._prenorm_candidate_states = _gather_candidate_features(
+                cache.field_features, cache.state_idxs, field_indices
+            )
             self._field_cache = cache
             # global_mean_tiling from valid-only counts, matching field-level progress
             self._df = self._df.copy()
             for name, values in cache.field_tiling.items():
                 if name in self._df.columns:
                     self._df[name] = values
-            # The candidate index on the field path is the field id (zenith rows keep the zenith sentinel).
+            # Field candidates are indexed by field id (zenith rows keep the zenith sentinel).
             fids = self._df['field_id'].to_numpy()
-            self._df['bin'] = np.where(fids == ZENITH_FIELD_ID, ZENITH_BIN_NUM, fids).astype(np.int64)
-        elif self.include_bin_features:
-            bin_indices = [cache.bin_feature_names.index(f) for f in self.bin_feature_names]
-            self._prenorm_bin_states = _gather_bin_features(
-                cache.bin_features, cache.state_idxs, bin_indices
-            )
+            self._df['candidate_idx'] = np.where(fids == ZENITH_FIELD_ID, ZENITH_BIN_NUM, fids).astype(np.int64)
         else:
-            self._prenorm_bin_states = None
+            self._df['candidate_idx'] = self._df['bin']
+            if self.include_candidate_features:
+                bin_indices = [cache.bin_feature_names.index(f) for f in self.candidate_feature_names]
+                self._prenorm_candidate_states = _gather_candidate_features(
+                    cache.bin_features, cache.state_idxs, bin_indices
+                )
+            else:
+                self._prenorm_candidate_states = None
 
         self.state_idxs = cache.state_idxs
         self.current_state_idxs = cache.current_state_idxs
@@ -303,26 +525,26 @@ class TransitionDataset(torch.utils.data.Dataset):
         )
         self.slew_distances = torch.as_tensor(cache.slew_distances, dtype=torch.float32)
 
-        self.nbins = len(self.hpGrid.lon)
+        self.n_candidates = len(self.candidate_grid.lon)
         self.unique_nights = self._df['night'].unique()
         self.n_nights = self._df.groupby('night').ngroups
 
         if self.num_actions is None:
             action_space = self._action_space_str
             if action_space in ['radec', 'azel']:
-                self.num_actions = self.nbins
+                self.num_actions = self.n_candidates
             else:
-                self.num_actions = self.nbins * self.num_filters
+                self.num_actions = self.n_candidates * self.num_filters
 
     # ------------------------------------------------------------------
     # Transition construction
     # ------------------------------------------------------------------
 
     def _build_transitions(self, action_space):
-        states, bin_states = self._construct_states(
+        states, candidate_states = self._construct_states(
             df=self._df,
-            bin_states=self._prenorm_bin_states,
-            include_bin_features=self.include_bin_features,
+            candidate_states=self._prenorm_candidate_states,
+            include_candidate_features=self.include_candidate_features,
             state_idxs=self.state_idxs,
         )
         num_transitions = len(self.next_state_idxs)
@@ -349,10 +571,10 @@ class TransitionDataset(torch.utils.data.Dataset):
         self.action_masks = torch.as_tensor(action_masks, dtype=torch.bool)
         self.num_transitions = num_transitions
 
-        if self.include_bin_features:
-            self._prenorm_bin_states = torch.as_tensor(bin_states, dtype=torch.float32)
+        if self.include_candidate_features:
+            self._prenorm_candidate_states = torch.as_tensor(candidate_states, dtype=torch.float32)
         else:
-            self._prenorm_bin_states = None
+            self._prenorm_candidate_states = None
 
     def _apply_min_teff(self) -> None:
         """Drop transitions whose exposure has teff <= min_teff; no-op when min_teff is None.
@@ -403,11 +625,11 @@ class TransitionDataset(torch.utils.data.Dataset):
         dones[-1] = True
         return dones
 
-    def _construct_states(self, df, bin_states, include_bin_features, state_idxs):
+    def _construct_states(self, df, candidate_states, include_candidate_features, state_idxs):
         global_states = self._construct_global_features(df=df, state_idxs=state_idxs)
-        if not include_bin_features:
-            bin_states = None
-        return global_states, bin_states
+        if not include_candidate_features:
+            candidate_states = None
+        return global_states, candidate_states
 
     def _construct_global_features(self, df, state_idxs):
         missing_cols = set(self.global_feature_names) - set(df.columns)
@@ -425,12 +647,12 @@ class TransitionDataset(torch.utils.data.Dataset):
             filter_indices = next_state_df['filter'].map(FILTER2IDX).values.astype(np.int64)
             return field_ids * _NUM_FILTERS + filter_indices
 
-        if self.hpGrid.is_azel:
+        if self.candidate_grid.is_azel:
             lonlat = next_state_df[['az', 'el']].values
         else:
             lonlat = next_state_df[['ra', 'dec']].values
 
-        bin_indices = self.hpGrid.ang2idx(lon=lonlat[:, 0], lat=lonlat[:, 1])
+        bin_indices = self.candidate_grid.ang2idx(lon=lonlat[:, 0], lat=lonlat[:, 1])
 
         if 'filter' not in action_space:
             return bin_indices
@@ -655,9 +877,9 @@ class TransitionDataset(torch.utils.data.Dataset):
         comp_cols = [names.index(f"completion_{f}") for f in FILTER2IDX]
         dec = self.lookups.fields['dec'].to_numpy()
         rows = np.asarray(state_idxs)
-        masks = np.empty((len(rows), self.nbins * self.num_filters), dtype=np.bool_)
-        for start in range(0, len(rows), _BIN_GATHER_CHUNK):
-            chunk = cache.field_features[rows[start:start + _BIN_GATHER_CHUNK]]
+        masks = np.empty((len(rows), self.n_candidates * self.num_filters), dtype=np.bool_)
+        for start in range(0, len(rows), _GATHER_CHUNK):
+            chunk = cache.field_features[rows[start:start + _GATHER_CHUNK]]
             visible = self._telescope.visible(chunk[..., el_col], chunk[..., ha_col], dec, self._airmass_limit)
             completion = chunk[..., comp_cols]
             incomplete = completion < 1.0          # NaN (out of plan) compares False
@@ -670,15 +892,15 @@ class TransitionDataset(torch.utils.data.Dataset):
                 return np.ones((num_states, self.num_actions), dtype=np.bool_)
             return self._field_action_masks(state_idxs)
         state_df = state_df.iloc[state_idxs]
-        els = np.empty((num_states, self.nbins), dtype=np.float32)
+        els = np.empty((num_states, self.n_candidates), dtype=np.float32)
 
         if action_space == 'filter':
             return np.ones((num_states, self.num_filters), dtype=np.bool_)
 
         if self._calculate_action_mask:
             logger.info("Calculating action masks based on horizon…")
-            if not self.hpGrid.is_azel:
-                lon, lat = self.hpGrid.lon, self.hpGrid.lat
+            if not self.candidate_grid.is_azel:
+                lon, lat = self.candidate_grid.lon, self.candidate_grid.lat
                 for i, time in tqdm(
                     enumerate(state_df['timestamp'].values),
                     total=len(state_df['timestamp'].values),
@@ -689,7 +911,7 @@ class TransitionDataset(torch.utils.data.Dataset):
                 action_mask = els > 0
             else:
                 els = np.tile(
-                    self.hpGrid.lat[:, np.newaxis],
+                    self.candidate_grid.lat[:, np.newaxis],
                     reps=len(state_df['timestamp'].values),
                 ).T
                 action_mask = els > 0
@@ -763,12 +985,12 @@ class TransitionDataset(torch.utils.data.Dataset):
         global_normalizer = StateNormalizer(
             state_feature_names=self.global_feature_names, **norm_kwargs
         )
-        bin_normalizer = StateNormalizer(
-            state_feature_names=self.bin_feature_names, **norm_kwargs
+        candidate_normalizer = StateNormalizer(
+            state_feature_names=self.candidate_feature_names, **norm_kwargs
         )
         if self.field_level:
-            bin_normalizer = build_field_normalizer(self.bin_feature_names)
-            field_stats = field_norm_stats(self.bin_feature_names)
+            candidate_normalizer = build_field_normalizer(self.candidate_feature_names)
+            field_stats = field_norm_stats(self.candidate_feature_names)
 
         if fit:
             self.states, glob_z, glob_rel, self.global_sentinel_mask = \
@@ -782,28 +1004,28 @@ class TransitionDataset(torch.utils.data.Dataset):
 
         bin_z, bin_rel = None, None
         if self.field_level:
-            self._prenorm_bin_states, self.bin_sentinel_mask = bin_normalizer.transform(
-                state=torch.as_tensor(self._prenorm_bin_states), z_stats_dict=field_stats, rel_stats_dict={}
+            self._prenorm_candidate_states, self.candidate_sentinel_mask = candidate_normalizer.transform(
+                state=torch.as_tensor(self._prenorm_candidate_states), z_stats_dict=field_stats, rel_stats_dict={}
             )
-        elif self.include_bin_features and self._prenorm_bin_states is not None:
-            bin_tensor = torch.as_tensor(self._prenorm_bin_states)
+        elif self.include_candidate_features and self._prenorm_candidate_states is not None:
+            bin_tensor = torch.as_tensor(self._prenorm_candidate_states)
             if fit:
-                self._prenorm_bin_states, bin_z, bin_rel, self.bin_sentinel_mask = \
-                    bin_normalizer.fit_transform(
+                self._prenorm_candidate_states, bin_z, bin_rel, self.candidate_sentinel_mask = \
+                    candidate_normalizer.fit_transform(
                         state=bin_tensor, train_state_idxs=self.train_state_idxs
                     )
             else:
-                self._prenorm_bin_states, self.bin_sentinel_mask = bin_normalizer.transform(
+                self._prenorm_candidate_states, self.candidate_sentinel_mask = candidate_normalizer.transform(
                     state=bin_tensor, **self._given_norm_stats.normalizer_kwargs('bin_features')
                 )
         else:
-            self.bin_sentinel_mask = None
+            self.candidate_sentinel_mask = None
 
-        # (n_states, n_bins): True where bin has no sentinel values at this timestep
-        if self.bin_sentinel_mask is not None:
-            self.active_bin_mask = ~self.bin_sentinel_mask.any(dim=-1)
+        # (n_states, n_candidates): True where the candidate has no sentinel values at this timestep
+        if self.candidate_sentinel_mask is not None:
+            self.active_candidate_mask = ~self.candidate_sentinel_mask.any(dim=-1)
         else:
-            self.active_bin_mask = None
+            self.active_candidate_mask = None
 
         self.norm_stats = self._given_norm_stats if not fit else NormStats(
             z_score={'global_features': glob_z, 'bin_features': bin_z},
@@ -819,39 +1041,40 @@ class TransitionDataset(torch.utils.data.Dataset):
 
     def _format_tensors_for_network(self, network_type):
         if network_type == 'mlp':
-            if self.include_bin_features and self._prenorm_bin_states is not None:
+            if self.include_candidate_features and self._prenorm_candidate_states is not None:
                 if not isinstance(self.states, torch.Tensor):
                     self.states = torch.as_tensor(self.states, dtype=torch.float32)
-                if not isinstance(self._prenorm_bin_states, torch.Tensor):
-                    self._prenorm_bin_states = torch.as_tensor(
-                        self._prenorm_bin_states, dtype=torch.float32
+                if not isinstance(self._prenorm_candidate_states, torch.Tensor):
+                    self._prenorm_candidate_states = torch.as_tensor(
+                        self._prenorm_candidate_states, dtype=torch.float32
                     )
-                bs_flat = self._prenorm_bin_states.reshape(
-                    self._prenorm_bin_states.shape[0], -1
+                cs_flat = self._prenorm_candidate_states.reshape(
+                    self._prenorm_candidate_states.shape[0], -1
                 )
-                self.states = torch.cat([self.states, bs_flat], dim=1)
-                self._prenorm_bin_states = None
-                self.bin_states = None
-            self.bin_state_dim = 0
+                self.states = torch.cat([self.states, cs_flat], dim=1)
+                self._prenorm_candidate_states = None
+                self.candidate_states = None
+            self.candidate_state_dim = 0
             self.state_dim = self.states.shape[-1]
         else:
             self.state_dim = self.states.shape[-1]
-            self.bin_states = self._prenorm_bin_states
-            self.bin_state_dim = (
-                self.bin_states.shape[-1] if self.include_bin_features and self.bin_states is not None else 0
+            self.candidate_states = self._prenorm_candidate_states
+            self.candidate_state_dim = (
+                self.candidate_states.shape[-1]
+                if self.include_candidate_features and self.candidate_states is not None else 0
             )
 
         self.dataset_dims = {
             'state_dim': self.state_dim,
-            'bin_state_dim': self.bin_state_dim,
-            'num_bins': self.nbins,
+            'candidate_state_dim': self.candidate_state_dim,
+            'num_candidates': self.n_candidates,
             'num_filters': self.num_filters,
             'num_actions': self.num_actions,
         }
         self.dataset_feature_names = {
             'global_features': self.global_feature_names,
-            'bin_features': [] if self.field_level else self.bin_feature_names,
-            'field_features': self.bin_feature_names if self.field_level else [],
+            'bin_features': [] if self.field_level else self.candidate_feature_names,
+            'field_features': self.candidate_feature_names if self.field_level else [],
         }
 
     def _validate_dataset(self):
@@ -861,9 +1084,9 @@ class TransitionDataset(torch.utils.data.Dataset):
                 == self.dones.shape[0] == self.num_transitions), \
             (f"Transition mismatch: actions {self.actions.shape[0]}, "
              f"rewards {self.rewards.shape[0]}, dones {self.dones.shape[0]}")
-        if self.include_bin_features and self.bin_states is not None:
-            assert self.states.shape[0] == self.bin_states.shape[0], \
-                f"State mismatch: global {self.states.shape[0]}, bin {self.bin_states.shape[0]}"
+        if self.include_candidate_features and self.candidate_states is not None:
+            assert self.states.shape[0] == self.candidate_states.shape[0], \
+                f"State mismatch: global {self.states.shape[0]}, candidate {self.candidate_states.shape[0]}"
 
     # ------------------------------------------------------------------
     # Dataset protocol
@@ -877,14 +1100,10 @@ class TransitionDataset(torch.utils.data.Dataset):
         n_idx = self.next_compact_idxs[idx]
         is_done = self.dones[idx].item()
 
-        _zero_bin = (
-            torch.zeros_like(self.bin_states[0])
-            if (self.include_bin_features and self.bin_states is not None)
-            else torch.as_tensor(0)
-        )
-        bin_c = self.bin_states[c_idx] if (self.include_bin_features and self.bin_states is not None) else torch.as_tensor(0)
-        bin_n = (self.bin_states[n_idx] if not is_done else _zero_bin) \
-            if (self.include_bin_features and self.bin_states is not None) else torch.as_tensor(0)
+        has_candidates = self.include_candidate_features and self.candidate_states is not None
+        _zero_cand = torch.zeros_like(self.candidate_states[0]) if has_candidates else torch.as_tensor(0)
+        cand_c = self.candidate_states[c_idx] if has_candidates else torch.as_tensor(0)
+        cand_n = (self.candidate_states[n_idx] if not is_done else _zero_cand) if has_candidates else torch.as_tensor(0)
 
         return (
             self.states[c_idx],
@@ -894,7 +1113,7 @@ class TransitionDataset(torch.utils.data.Dataset):
             self.dones[idx],
             self.action_masks[c_idx],
             self.action_masks[n_idx] if not is_done else torch.zeros_like(self.action_masks[0]),
-            bin_c,
-            bin_n,
+            cand_c,
+            cand_n,
             self.slew_distances[idx],
         )

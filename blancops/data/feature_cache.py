@@ -2,27 +2,24 @@
 
 Two dataclasses are defined here:
 
-- ``RawFeatureCache``: stores all raw (unnormalized) features for every
-  observation in the training dataset, independent of experiment config.
+- ``BinFeatureCache``: stores all raw (unnormalized) HEALPix bin features for
+  every observation in the training dataset, independent of experiment config.
   Computed once by ``precompute-features`` and shared across training runs.
 
-- ``DatasetCache``: stores normalized tensors for one split's nights (val or
-  test), built after a training run has fixed the split and normalization
-  stats. Loaded by the evaluation pipeline to avoid re-processing on repeated
-  runs. ``ValDatasetCache`` remains as a backwards-compatible alias.
+- ``FieldFeatureCache``: the same for survey-field candidates (field_filter).
+
+The per-run, normalized snapshot of one split is ``TransitionDatasetCache`` in ``data/dataset.py``.
 """
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-import torch
 
 from blancops.configs.constants import (
     _BIN_FEATURES,
@@ -63,8 +60,8 @@ def _get_state_indices(df: pd.DataFrame, max_time_diff_min: int = 5, label: str 
     return state_idxs, current_state_idxs, next_state_idxs, df_idx_to_compact
 
 
-def _compute_slew_distances(df, current_state_idxs, next_state_idxs, hpGrid):
-    """Angular slew distance for each transition (radians), as a float32 array."""
+def _bin_slew_distances(df, current_state_idxs, next_state_idxs, hpGrid):
+    """Angular slew distance per transition between HEALPix bin centers (radians), as a float32 array."""
     from blancops.ephemerides import ephemerides as _eph
 
     curr_bids = df.iloc[current_state_idxs]['bin'].values.copy()
@@ -106,12 +103,12 @@ def _nights_in_date_range(night_dts, start_date, end_date) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# RawFeatureCache
+# BinFeatureCache -- HEALPix bin candidates
 # ---------------------------------------------------------------------------
 
 @dataclass
-class RawFeatureCache:
-    """All raw (unnormalized) features for a dataset, independent of training config.
+class BinFeatureCache:
+    """All raw (unnormalized) HEALPix bin features for a dataset, independent of training config.
 
     Computed once from a FITS file by ``precompute-features`` and reused
     across training runs that differ only in normalization scheme, reward
@@ -155,8 +152,8 @@ class RawFeatureCache:
     # ------------------------------------------------------------------
 
     @classmethod
-    def compute(cls, df: pd.DataFrame, lookups, hpGrid) -> 'RawFeatureCache':
-        """Build a ``RawFeatureCache`` from a raw observation DataFrame.
+    def compute(cls, df: pd.DataFrame, lookups, hpGrid) -> 'BinFeatureCache':
+        """Build a ``BinFeatureCache`` from a raw observation DataFrame.
 
         Runs ``GlobalFeatureEngineer`` with *all* ``_GLOBAL_FEATURES`` and
         ``BinFeatureEngineer`` with *all* ``_BIN_FEATURES``.
@@ -216,7 +213,7 @@ class RawFeatureCache:
         state_idxs, current_state_idxs, next_state_idxs, _ = _get_state_indices(enriched_df)
 
         logger.info("Computing slew distances…")
-        slew_distances = _compute_slew_distances(
+        slew_distances = _bin_slew_distances(
             enriched_df, current_state_idxs, next_state_idxs, hpGrid
         )
 
@@ -244,8 +241,8 @@ class RawFeatureCache:
         filtered_df = self.global_df[mask].reset_index(drop=True)
         _get_state_indices(filtered_df, label=label)
 
-    def filter_nights(self, nights, label: str = '') -> 'RawFeatureCache':
-        """Return a new ``RawFeatureCache`` restricted to ``nights``.
+    def filter_nights(self, nights, label: str = '') -> 'BinFeatureCache':
+        """Return a new ``BinFeatureCache`` restricted to ``nights``.
 
         All indices in the returned cache are **local** to the filtered
         DataFrame (0-based), so downstream code sees a self-contained,
@@ -269,11 +266,11 @@ class RawFeatureCache:
 
         from blancops.ephemerides import ephemerides as _eph
         hpGrid = _eph.HealpixGrid(nside=self.nside, is_azel=self.is_azel)
-        slew_distances = _compute_slew_distances(
+        slew_distances = _bin_slew_distances(
             filtered_df, current_state_idxs, next_state_idxs, hpGrid
         )
 
-        return RawFeatureCache(
+        return BinFeatureCache(
             nside=self.nside,
             is_azel=self.is_azel,
             global_df=filtered_df,
@@ -323,7 +320,7 @@ class RawFeatureCache:
         )
         if self.interruptions is not None:
             self.save_interruptions(cache_dir, self.interruptions)
-        logger.info(f"RawFeatureCache saved to {cache_dir}")
+        logger.info(f"BinFeatureCache saved to {cache_dir}")
 
     @classmethod
     def save_interruptions(cls, cache_dir: Path, interruptions: pd.DataFrame) -> None:
@@ -341,7 +338,7 @@ class RawFeatureCache:
     @classmethod
     def load(cls, cache_dir: Path, mmap_bin: bool = False,
              start_date: str | None = None,
-             end_date: str | None = None) -> 'RawFeatureCache':
+             end_date: str | None = None) -> 'BinFeatureCache':
         """Load from disk.
 
         Args:
@@ -354,16 +351,16 @@ class RawFeatureCache:
 
         with open(cache_dir / 'metadata.json') as f:
             meta = json.load(f)
-        logger.info(f"Loading RawFeatureCache metadata from {cache_dir}")
+        logger.info(f"Loading BinFeatureCache metadata from {cache_dir}")
 
         global_df = pd.read_parquet(cache_dir / 'global_df.parquet')
 
         mmap_mode = 'r' if mmap_bin else None
         bin_features = np.load(cache_dir / 'bin_features.npy', mmap_mode=mmap_mode)
-        logger.info(f"Loading RawFeatureCache bin_features from {cache_dir}")
+        logger.info(f"Loading BinFeatureCache bin_features from {cache_dir}")
 
         t = np.load(cache_dir / 'transitions.npz')
-        logger.info(f"Loading RawFeatureCache transitions from {cache_dir}")
+        logger.info(f"Loading BinFeatureCache transitions from {cache_dir}")
 
         cache = cls(
             nside=meta['nside'],
@@ -595,7 +592,7 @@ class FieldFeatureCache:
                 cache = cache.filter_nights(nights, label='date range')
         return cache
 
-    nights_in_range = RawFeatureCache.nights_in_range
+    nights_in_range = BinFeatureCache.nights_in_range
 
     def log_transition_filter_stats(self, nights, label: str = '') -> None:
         """Log how many transitions the time-diff filter removes for ``nights``."""
@@ -633,212 +630,3 @@ class FieldFeatureCache:
             state_idxs=state_idxs, current_state_idxs=current_state_idxs, next_state_idxs=next_state_idxs,
             slew_distances=slew, interruptions=self.interruptions,
         )
-
-
-# ---------------------------------------------------------------------------
-# DatasetCache
-# ---------------------------------------------------------------------------
-
-@dataclass
-class DatasetCache:
-    """Post-normalization tensors for one split's nights.
-
-    Built after a training run fixes the night split and normalization stats.
-    Saved as ``outdir/checkpoints/<split>_dataset_cache.pt`` (``torch.save``).
-
-    Exposes the same attributes queried by the evaluator infrastructure
-    (``DataContainer``, ``SingleStepEvaluator``) so it can be used as a
-    drop-in replacement for ``TransitionDataset`` in those paths.
-    """
-
-    # Normalized state tensors (val states only)
-    states: torch.Tensor
-    bin_states: Optional[torch.Tensor]  # None when no bin features
-    action_masks: torch.Tensor
-    active_bin_mask: Optional[torch.Tensor]  # None when no bin features
-
-    # Per-transition tensors
-    actions: torch.Tensor
-    rewards: torch.Tensor
-    dones: torch.Tensor
-    slew_distances: torch.Tensor
-
-    # Compact indices into val-state tensors
-    curr_compact_idxs: np.ndarray
-    next_compact_idxs: np.ndarray
-
-    # Original (local-to-val-df) state indices — needed by DataContainer for
-    # night-boundary detection and _df.iloc[] access
-    current_state_idxs: np.ndarray
-    next_state_idxs: np.ndarray
-    state_idxs: np.ndarray
-
-    # Split-night DataFrame (all enriched columns, split nights only, local index)
-    split_df: pd.DataFrame
-
-    # Metadata
-    global_feature_names: List[str]
-    bin_feature_names: List[str]
-    dataset_dims: dict
-    split_nights: List[str]
-    nside: int
-    is_azel: bool
-    split: str = 'val'
-    # Field centers (RA, Dec) for field_filter datasets, whose candidates are fields; None for bin datasets
-    field_radec: Optional[np.ndarray] = None
-
-    # ------------------------------------------------------------------
-    # Properties for evaluator compatibility
-    # ------------------------------------------------------------------
-
-    @property
-    def _df(self) -> pd.DataFrame:
-        return self.split_df
-
-    @property
-    def val_df(self) -> pd.DataFrame:
-        return self.split_df
-
-    @property
-    def val_nights(self) -> List[str]:
-        return self.split_nights
-
-    @property
-    def unique_nights(self):
-        return self.split_df['night'].unique()
-
-    @property
-    def _prenorm_bin_states(self) -> Optional[torch.Tensor]:
-        # In TransitionDataset the prenorm array is normalized in-place, so
-        # _prenorm_bin_states IS the normalized bin_states after __init__.
-        return self.bin_states
-
-    @property
-    def nbins(self) -> int:
-        return self.dataset_dims['num_bins']
-
-    @property
-    def include_bin_features(self) -> bool:
-        return self.bin_states is not None
-
-    @property
-    def hpGrid(self):
-        if self.field_radec is not None:
-            from blancops.data.features.field_features import FieldGrid
-            return FieldGrid(self.field_radec[0], self.field_radec[1])
-        from blancops.ephemerides import ephemerides as _eph
-        return _eph.HealpixGrid(nside=self.nside, is_azel=self.is_azel)
-
-    # ------------------------------------------------------------------
-    # Construction from TransitionDataset
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def from_transition_dataset(cls, dataset, split: str = 'val') -> 'DatasetCache':
-        """Build from a ``TransitionDataset`` constructed on a single split's
-        ``RawFeatureCache``. All transitions in the source dataset belong to
-        that split.
-
-        Args:
-            dataset: The source TransitionDataset.
-            split: Split name, 'val' or 'test'.
-
-        Returns:
-            The populated DatasetCache.
-        """
-        split_nights = dataset.night_split.nights_for(split)
-        return cls(
-            states=dataset.states,
-            bin_states=dataset.bin_states,
-            action_masks=dataset.action_masks,
-            active_bin_mask=getattr(dataset, 'active_bin_mask', None),
-            actions=dataset.actions,
-            rewards=dataset.rewards,
-            dones=dataset.dones,
-            slew_distances=dataset.slew_distances,
-            curr_compact_idxs=dataset.curr_compact_idxs,
-            next_compact_idxs=dataset.next_compact_idxs,
-            current_state_idxs=dataset.current_state_idxs,
-            next_state_idxs=dataset.next_state_idxs,
-            state_idxs=dataset.state_idxs,
-            split_df=dataset._df,
-            global_feature_names=dataset.global_feature_names,
-            bin_feature_names=dataset.bin_feature_names,
-            dataset_dims=dataset.dataset_dims,
-            split_nights=list(split_nights),
-            nside=dataset.hpGrid.nside,
-            is_azel=dataset.hpGrid.is_azel,
-            split=split,
-            field_radec=(np.array([dataset.hpGrid.lon, dataset.hpGrid.lat])
-                         if getattr(dataset, 'field_level', False) else None),
-        )
-
-    # ------------------------------------------------------------------
-    # Transition alignment
-    # ------------------------------------------------------------------
-
-    def to_transition_tensors(
-        self,
-        idxs: Optional[np.ndarray] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
-        """Expand the compact per-state tensors into per-transition rows. Used only
-        in run_explain.py for now.
-
-        Args:
-            idxs: transition indices to expand; None expands all. Subsetting
-                here, before the gather, keeps peak memory proportional to the
-                sample instead of the full transition set.
-
-        Returns:
-            global_obs     [n_transitions, n_global]
-            bin_obs        [n_transitions, n_bins, n_bin_feats]
-            expert_actions [n_transitions]
-            valid_mask     [n_transitions, n_bins * n_filters] bool
-        """
-        curr = torch.as_tensor(self.curr_compact_idxs, dtype=torch.long)
-        actions = self.actions.long()
-        if idxs is not None:
-            idxs = torch.as_tensor(idxs, dtype=torch.long)
-            curr = curr[idxs]
-            actions = actions[idxs]
-        return (
-            self.states[curr],               # [n_transitions, n_global]
-            self.bin_states[curr] if self.bin_states is not None else None,           # [n_transitions, n_bins, n_bin_feats]
-            actions,                         # [n_transitions]
-            self.action_masks[curr].bool(),  # [n_transitions, n_actions]
-        )
-
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
-    def save(self, path: Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # torch.save pickles non-tensor fields (DataFrame, lists, dicts)
-        torch.save(dataclasses.asdict(self), path)
-        logger.info(f"DatasetCache ({self.split}) saved to {path}")
-
-    @classmethod
-    def load(cls, path: Path) -> 'DatasetCache':
-        d = torch.load(path, weights_only=False)
-        # Restore numpy arrays from any tensors that torch.save may have converted
-        for key in ('curr_compact_idxs', 'next_compact_idxs',
-                    'current_state_idxs', 'next_state_idxs', 'state_idxs'):
-            if isinstance(d[key], torch.Tensor):
-                d[key] = d[key].numpy()
-        # Migrate caches written before the split rename
-        if 'val_df' in d:
-            d['split_df'] = d.pop('val_df')
-        if 'val_nights' in d:
-            d['split_nights'] = d.pop('val_nights')
-        d.setdefault('split', 'val')
-        return cls(**d)
-
-    @classmethod
-    def exists(cls, path: Path) -> bool:
-        return Path(path).exists()
-
-
-# Backwards-compatible alias for code and pickles predating the split rename
-ValDatasetCache = DatasetCache

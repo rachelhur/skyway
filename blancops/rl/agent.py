@@ -58,15 +58,15 @@ class Agent:
         self.field_choice_method = field_choice_method
         self.action_decode = action_decode
 
-    def _choose_bin_and_filter(self, x_glob, x_bin, action_mask, info, epsilon=None):
+    def _choose_bin_and_filter(self, x_glob, x_cand, action_mask, info, epsilon=None):
         do_filt = has_filter(self.cfg.data.action_space)
         visible_bin_mask = info.get('visible_bin_mask') if info is not None else None
 
         if self.action_decode == 'filter_first' and do_filt and action_mask is not None and visible_bin_mask is not None:
-            return self._filter_first_decode(x_glob, x_bin, action_mask, visible_bin_mask)
+            return self._filter_first_decode(x_glob, x_cand, action_mask, visible_bin_mask)
 
         # Joint argmax over the flat (bin, filter) table (default).
-        action_tensor = self.policy.select_action(x_glob=x_glob, x_bin=x_bin, action_mask=action_mask)
+        action_tensor = self.policy.select_action(x_glob=x_glob, x_cand=x_cand, action_mask=action_mask)
         action = int(action_tensor.item()) if hasattr(action_tensor, 'item') else int(action_tensor)
 
         if do_filt:
@@ -77,10 +77,10 @@ class Agent:
             filter_idx = NO_FILTER_SIGNAL
         return bin_idx, filter_idx
 
-    def _filter_first_decode(self, x_glob, x_bin, action_mask, visible_bin_mask):
+    def _filter_first_decode(self, x_glob, x_cand, action_mask, visible_bin_mask):
         """Choose the filter over all visible bins, then the best available bin for it."""
         with torch.no_grad():
-            scores = self.policy.core_net(x_glob, x_bin)
+            scores = self.policy.core_net(x_glob, x_cand)
         visible = torch.as_tensor(visible_bin_mask, device=scores.device, dtype=torch.bool)
         bin_idx, filter_idx = filter_first_decode(
             scores, action_mask.view(1, -1), visible.view(1, -1), self.policy.num_filters
@@ -142,7 +142,7 @@ class Agent:
         if action_mask is not None and not bool(action_mask.any()):
             return WAIT_SIGNAL, 0, -1
         with torch.no_grad():
-            action = int(self.policy.select_action(x_glob=glob_tensor, x_bin=cand_tensor, action_mask=action_mask))
+            action = int(self.policy.select_action(x_glob=glob_tensor, x_cand=cand_tensor, action_mask=action_mask))
         field_id, filter_idx = divmod(action, self.policy.num_filters)
         ra, dec = self.lookups.fields['ra'].to_numpy()[field_id], self.lookups.fields['dec'].to_numpy()[field_id]
         if hpGrid.is_azel:
@@ -156,14 +156,14 @@ class Agent:
         """
         # Unpack obs
         glob_tensor = torch.as_tensor(obs['global_state'], device=self.device, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
-        bin_tensor = torch.as_tensor(obs['bin_state'], device=self.device, dtype=torch.float32).unsqueeze(0)     # Add batch dimension
+        cand_tensor = torch.as_tensor(obs['candidate_state'], device=self.device, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
         action_tensor_mask = torch.as_tensor(info.get('action_mask', None), device=self.device, dtype=torch.bool) if info.get('action_mask', None) is not None else None
 
         if is_field_level(self.cfg.data.action_space):
-            return self._choose_field_filter(glob_tensor, bin_tensor, action_tensor_mask, info, hpGrid)
+            return self._choose_field_filter(glob_tensor, cand_tensor, action_tensor_mask, info, hpGrid)
 
         # Choose action in action space
-        bin_idx, filter_idx = self._choose_bin_and_filter(glob_tensor, bin_tensor, action_tensor_mask, info, epsilon)
+        bin_idx, filter_idx = self._choose_bin_and_filter(glob_tensor, cand_tensor, action_tensor_mask, info, epsilon)
 
         # Get valid fields in bin
         valid_field_ids = self._determine_valid_fields(bin_idx, filter_idx, info)
@@ -171,11 +171,11 @@ class Agent:
         if self.field_choice_method == 'interp':
             with torch.no_grad():
                 # glob_tensor = torch.as_tensor(glob_tensor, device=self.device, dtype=torch.float32).unsqueeze(0)
-                # bin_tensor = torch.as_tensor(bin_tensor, device=self.device, dtype=torch.float32).unsqueeze(0)
+                # cand_tensor = torch.as_tensor(cand_tensor, device=self.device, dtype=torch.float32).unsqueeze(0)
 
-                raw_scores = self.policy.core_net(glob_tensor, bin_tensor)
+                raw_scores = self.policy.core_net(glob_tensor, cand_tensor)
 
-                n_bins = bin_tensor.shape[1]
+                n_bins = cand_tensor.shape[1]
                 n_filters = raw_scores.shape[-1] // n_bins
 
                 # Reshape to (n_bins, n_filters) and slice the specific filter

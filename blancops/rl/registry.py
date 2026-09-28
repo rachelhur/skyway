@@ -119,7 +119,7 @@ def build_network(cfg: ExperimentConfig) -> nn.Module:
     if cfg.model.network == Network.CONTEXTUAL_SCORE_MLP:
         return network_class(
             global_dim=cfg.data.state_dim,
-            bin_feat_dim=cfg.data.bin_state_dim,
+            cand_feat_dim=cfg.data.candidate_state_dim,
             score_dim=cfg.data.num_filters,
             hidden_dim=cfg.model.hidden_dim,
             nlayers=cfg.model.nlayers,
@@ -133,7 +133,7 @@ def build_network(cfg: ExperimentConfig) -> nn.Module:
         layer_norm = cfg.model.algorithm != Algorithm.BC
         return network_class(
             global_dim=cfg.data.state_dim,
-            bin_feat_dim=cfg.data.bin_state_dim,
+            cand_feat_dim=cfg.data.candidate_state_dim,
             hidden_dim=cfg.model.hidden_dim,
             score_dim=cfg.data.num_filters,
             activation=activation_fn,
@@ -196,7 +196,7 @@ def _build_bc_policy(cfg: ExperimentConfig, core_net: nn.Module):
 
     if cfg.model.loss_strategy == ActionArchitecture.HYBRID_MARGINAL:
         ce_loss = nn.CrossEntropyLoss(reduction=cfg.model.reduction)
-        # Joint head can use focal loss; bin/filter marginals stay CE for stability.
+        # Joint head can use focal loss; candidate/filter marginals stay CE for stability.
         joint_loss = (
             get_loss_function('focal_loss', gamma_focal=cfg.model.gamma_focal, alpha=None)
             if cfg.model.loss_function == 'focal_loss'
@@ -205,10 +205,10 @@ def _build_bc_policy(cfg: ExperimentConfig, core_net: nn.Module):
         return strategy_class(
             core_net=core_net,
             num_filters=cfg.data.num_filters,
-            bin_loss_function=ce_loss,
+            candidate_loss_function=ce_loss,
             filter_loss_function=primary_loss,
             joint_loss_function=joint_loss,
-            alpha_bin=cfg.model.alpha_bin,
+            alpha_candidate=cfg.model.alpha_candidate,
             beta_filter=cfg.model.beta_filter,
             zeta_joint=cfg.model.zeta_joint,
         )
@@ -317,7 +317,7 @@ def build_algorithm(cfg: ExperimentConfig, device: torch.device):
         policy_raw = build_network(cfg).to(device)   # separate net for the AWR policy
         v_net = StateValueMLP(
             glob_dim=cfg.data.state_dim,
-            bin_dim=cfg.data.num_bins * cfg.data.bin_state_dim,
+            cand_dim=cfg.data.num_candidates * cfg.data.candidate_state_dim,
             hidden=(cfg.model.hidden_dim,) * cfg.model.nlayers,
             layernorm=cfg.model.layernorm,
             activation=activation_fn,

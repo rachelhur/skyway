@@ -12,8 +12,8 @@ from blancops.ephemerides import ephemerides
 from blancops.configs.constants import *
 import logging
 
-from blancops.plotting.plotting import plot_bins_movie, plot_schedule_whole
-from blancops.configs.enums import grid_is_azel
+from blancops.plotting.plotting import plot_bins_movie, plot_fields_movie, plot_schedule_whole
+from blancops.configs.enums import grid_is_azel, is_field_level
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +34,14 @@ class OfflineRunner:
         self.policy = policy
         self.num_episodes = num_episodes
         self.lookups = lookups
+        self.field_level = is_field_level(cfg.data.action_space)
         self.field_choice_method = self.agent.field_choice_method
         self.outdir = Path(outdir)
         self.save_movie = save_movie
         self.save_mollweide = save_mollweide
         self.save_SISPI = save_SISPI
         self.SISPI_fn = SISPI_fn
-        # When True, also saves glob/bin observation arrays as .npz per night
+        # When True, also saves glob/candidate observation arrays as .npz per night
         # for use with diagnostic plot functions. Off by default to protect memory.
         self.save_state_features = save_state_features
         # When every action is masked because the survey targets reachable at
@@ -143,7 +144,7 @@ class OfflineRunner:
     # ------------------------------------------------------------------
 
     def _flush_obs_features(self, obs_dict, ep_num, night_key):
-        """Save glob/bin observation arrays as compressed .npz."""
+        """Save glob/candidate observation arrays as compressed .npz."""
         arr_dict = {}
         for key, values in obs_dict.items():
             arr = np.asarray(values)
@@ -169,6 +170,13 @@ class OfflineRunner:
 
     def _save_movie(self, df, ep_num, night_key):
         outfile = self._plots_dir / f'ep-{ep_num}_{night_key}_movie.gif'
+        if self.field_level:
+            plot_fields_movie(
+                outfile=outfile,
+                times=df[SCHEDULE_KEYS['timestamp']].values,
+                field_pos=self._field_pos_from_df(df),
+            )
+            return
         plot_bins_movie(
             outfile=outfile,
             nside=self.cfg.data.nside,
@@ -184,7 +192,7 @@ class OfflineRunner:
             outfile=outfile,
             times=df[SCHEDULE_KEYS['timestamp']].values,
             field_pos=self._field_pos_from_df(df),
-            bin_idxs=df[SCHEDULE_KEYS['bin_id']].values,
+            bin_idxs=None if self.field_level else df[SCHEDULE_KEYS['bin_id']].values,
             nside=self.cfg.data.nside,
         )
 
@@ -241,7 +249,7 @@ class OfflineRunner:
             # Lightweight per-step schedule records — only ~5 scalars each
             per_night_rows = []
             # Optional obs feature buffers (only populated when save_obs_features=True)
-            per_night_obs = {'glob_observations': [], 'bin_observations': [], 'action_masks': []} if self.save_state_features else None
+            per_night_obs = {'glob_observations': [], 'candidate_observations': [], 'action_masks': []} if self.save_state_features else None
 
             episode_manifest = {}  # night_key -> csv path
             episode_dispersion = {}  # night_key -> per-filter (D_b, baseline_b) at the night's last in-night step
@@ -285,8 +293,8 @@ class OfflineRunner:
                     obs_timestamp = info.get('timestamp')
                     pre_step_glob = obs['global_state']
                     pre_step_glob_nan_mask = info.get('glob_nan_mask')
-                    pre_step_bin  = obs['bin_state']
-                    pre_step_bin_nan_mask  = info.get('bin_nan_mask')
+                    pre_step_cand = obs['candidate_state']
+                    pre_step_cand_nan_mask = info.get('candidate_nan_mask')
 
                     obs, reward, terminated, truncated, info = env.step(
                         self.agent.command_to_env_action(bin_idx, filter_idx, field_id)
@@ -306,8 +314,8 @@ class OfflineRunner:
                         per_night_obs['glob_observations'].append(
                             self._restore_nans(pre_step_glob, pre_step_glob_nan_mask)
                         )
-                        per_night_obs['bin_observations'].append(
-                            self._restore_nans(pre_step_bin, pre_step_bin_nan_mask)
+                        per_night_obs['candidate_observations'].append(
+                            self._restore_nans(pre_step_cand, pre_step_cand_nan_mask)
                         )
                         per_night_obs['action_masks'].append(
                             np.asarray(action_mask, dtype=bool)
@@ -339,7 +347,7 @@ class OfflineRunner:
 
                         per_night_rows = []
                         if self.save_state_features:
-                            per_night_obs = {'glob_observations': [], 'bin_observations': [], 'action_masks': []}
+                            per_night_obs = {'glob_observations': [], 'candidate_observations': [], 'action_masks': []}
                             gc.collect()
 
                         night_idx = info.get('night_idx')

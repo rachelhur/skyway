@@ -1,8 +1,8 @@
 """Per-field features for the field_filter action space, shared by offline precompute and the environments.
 
 One helper, `compute_field_features`, computes every field feature for one timestep; the offline driver
-`FieldFeatureEngineer` and the environments both call it. Positional features reuse the bin ephemeris math
-evaluated at field centers through `FieldGrid`.
+`FieldFeatureEngineer` and the environments both call it. Positional features reuse the candidate ephemeris
+math evaluated at field centers through `FieldGrid`.
 
 Progress convention: counts, completion, and last-visit times advance only for valid exposures
 (teff > DES.valid_teff_threshold). The features of a state include that state's own exposure, matching the
@@ -13,9 +13,7 @@ import numpy as np
 from tqdm import tqdm
 
 from blancops.configs.constants import FILTER2IDX, IDX2FILTER, ZENITH_FIELD_ID, _FIELD_FEATURES
-from blancops.data.features.bin_features import (
-    _SUN_EL_LIMIT_DEG, compute_bin_ephemeris_features, get_relative_feature,
-)
+from blancops.data.features.candidate_features import compute_candidate_ephemeris_features, get_relative_feature
 from blancops.data.features.glob_features import compute_global_mean_tiling_features, get_night_boundaries
 from blancops.data.features.normalizations import StateNormalizer
 from blancops.ephemerides import ephemerides
@@ -48,9 +46,6 @@ FIELD_FEATURE_RANGES = {
 
 class FieldGrid(HealpixGrid):
     """HealpixGrid-compatible container over survey field centers (RA/Dec).
-
-    Every HealpixGrid method used by the ephemeris and metric code reads only `lon`, `lat`, and `is_azel`,
-    so bin feature math and angular-separation metrics evaluate at field coordinates unchanged.
 
     Parameters
     ----------
@@ -162,8 +157,8 @@ def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGr
     dict
         Feature name -> (n_fields,) array; per-filter features as `name_{filter}`.
     """
-    features = compute_bin_ephemeris_features(
-        timestamp=timestamp, pointing_radec=pointing_radec, hpGrid=field_grid,
+    features = compute_candidate_ephemeris_features(
+        timestamp=timestamp, pointing_radec=pointing_radec, grid=field_grid,
         night_duration_in_sec=night_duration_sec,
     )
     features['airmass'] = np.minimum(np.nan_to_num(features['airmass'], nan=_AIRMASS_CAP, posinf=_AIRMASS_CAP),
@@ -320,7 +315,7 @@ class FieldFeatureEngineer:
         i = 0
         pbar = tqdm(total=n_rows, desc='Computing field features')
         for night, group in pt_df.groupby('night', sort=False):
-            sunset_ts, sunrise_ts = get_night_boundaries(group['timestamp'], sun_el_limit=_SUN_EL_LIMIT_DEG)
+            sunset_ts, sunrise_ts = get_night_boundaries(group['timestamp'], sun_el_limit=DES.sun_el_limit)
             counts = visit_hist[night].copy().astype(np.int64)
             last_visit = last_visit_hist[night].copy().astype(np.float64)
             ot_sunset = ot_clock[night]

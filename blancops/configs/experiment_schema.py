@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator, ValidationInfo
+# XXX remove all uses of AliasChoices after confirming deployed model
+# can be re-run with identical output
+from pydantic import AliasChoices, BaseModel, Field, computed_field, field_validator, model_validator, ValidationInfo
 import yaml
 from pathlib import Path
 from typing import Any, List, Union, Literal, Dict
@@ -109,8 +111,11 @@ class BaseDataConfig(BaseModel):
 
     # Configurations calculated after data processing (required for model instantiation)
     state_dim: Optional[int] = None
-    bin_state_dim: Optional[int] = None
-    num_bins: Optional[int] = None
+    # Candidates are HEALPix bins, or survey fields for field_filter; old configs use the bin_* keys
+    candidate_state_dim: Optional[int] = Field(
+        default=None, validation_alias=AliasChoices('candidate_state_dim', 'bin_state_dim'))
+    num_candidates: Optional[int] = Field(
+        default=None, validation_alias=AliasChoices('num_candidates', 'num_bins'))
     num_filters: Optional[int] = None
     num_actions: Optional[int] = None
 
@@ -324,7 +329,8 @@ class BCAlgConfig(BaseAlgConfig):
     filter_penalty: float | None = None
 
     # Hybrid-marginal weights
-    alpha_bin: float | None = None
+    alpha_candidate: float | None = Field(
+        default=None, validation_alias=AliasChoices('alpha_candidate', 'alpha_bin'))
     beta_filter: float | None = None
     zeta_joint: float | None = None
 
@@ -345,7 +351,7 @@ class BCAlgConfig(BaseAlgConfig):
             raise ValueError('gamma_focal must be positive')
         return v
 
-    @field_validator('filter_penalty', 'alpha_bin', 'beta_filter', 'zeta_joint')
+    @field_validator('filter_penalty', 'alpha_candidate', 'beta_filter', 'zeta_joint')
     @classmethod
     def validate_optional_float(cls, v):
         if v is not None and v < 0:
@@ -585,8 +591,8 @@ def resolve_and_save(cfg: ExperimentConfig, dataset_dims: dict, dataset_feature_
     # UPDATE CONFIG.DATA
     data_updates = {
         "state_dim": int(dataset_dims['state_dim']),
-        "bin_state_dim": int(dataset_dims['bin_state_dim']),
-        "num_bins": int(dataset_dims['num_bins']),
+        "candidate_state_dim": int(dataset_dims['candidate_state_dim']),
+        "num_candidates": int(dataset_dims['num_candidates']),
         "num_filters": int(dataset_dims['num_filters']),
         "num_actions": int(dataset_dims['num_actions']),
         # "global_features": dataset_feature_names['global_features'],

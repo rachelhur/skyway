@@ -26,7 +26,7 @@ class CQL(DDQN):
         self.dist_matrix = dist_matrix
         self.dist_scaling_factor = dist_scaling_factor
 
-    def _compute_loss(self, batch_dict, hpGrid=None, compute_metrics=False):
+    def _compute_loss(self, batch_dict, candidate_grid=None, compute_metrics=False):
         q_vals_all, q_val, q_expected = self._forward_q(batch_dict)
 
         td_loss = self._td_loss(q_val, q_expected)
@@ -41,7 +41,7 @@ class CQL(DDQN):
 
         metrics = {}
         if compute_metrics:
-            metrics = self._build_metrics(q_vals_all, q_val, q_expected, batch_dict, hpGrid) # inherited from ddqn
+            metrics = self._build_metrics(q_vals_all, q_val, q_expected, batch_dict, candidate_grid) # inherited from ddqn
             metrics["td_loss"] = td_loss.item()
             metrics["cql_loss"] = cql_loss.item()
         return loss, metrics

@@ -329,8 +329,8 @@ class LiveBlancoEnv(BaseBlancoEnv):
         """Refresh action masks and feature vectors after a state change."""
         self._update_action_masks()
         self._global_state = self._calculate_global_features()
-        if self.include_bin_features:
-            self._bin_state = self._calculate_bin_features()
+        if self.include_candidate_features:
+            self._candidate_state = self._calculate_candidate_features()
 
     # -----------------------------------------------------------------------
     # BaseBlancoEnv lifecycle hooks

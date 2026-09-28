@@ -32,8 +32,8 @@ from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_ca
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
 from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
-from blancops.data.dataset import TransitionDataset
-from blancops.data.feature_cache import FieldFeatureCache, RawFeatureCache, DatasetCache
+from blancops.data.dataset import TransitionDataset, TransitionDatasetCache
+from blancops.data.feature_cache import FieldFeatureCache, BinFeatureCache
 from blancops.data.norm_stats import NormStats
 from blancops.data.splits import NightSplit
 from blancops.data.features.normalizations import build_normalizer
@@ -112,12 +112,12 @@ def build_evaluators(
     val_cache_path = run_paths.dataset_cache(split)
     _data_dir = Path(data_dir) if data_dir is not None else workspace().des_data
     field_level_cache = is_field_level(cfg.data.action_space)
-    cache_cls = FieldFeatureCache if field_level_cache else RawFeatureCache
+    cache_cls = FieldFeatureCache if field_level_cache else BinFeatureCache
     cache_dir = (field_feature_cache_dir(_data_dir) if field_level_cache
                  else feature_cache_dir(_data_dir, cfg.data.nside, is_azel=grid_is_azel(cfg.data.action_space)))
 
-    if DatasetCache.exists(val_cache_path):
-        val_dataset = DatasetCache.load(val_cache_path)
+    if TransitionDatasetCache.exists(val_cache_path):
+        val_dataset = TransitionDatasetCache.load(val_cache_path)
     else:
         if not cache_cls.exists(cache_dir):
             raise FileNotFoundError(
@@ -135,13 +135,13 @@ def build_evaluators(
                 f"cannot reconstruct the {split} dataset."
             )
         full_cache = (FieldFeatureCache.load(cache_dir, mmap=True) if field_level_cache
-                      else RawFeatureCache.load(cache_dir, mmap_bin=True))
+                      else BinFeatureCache.load(cache_dir, mmap_bin=True))
         val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
             cache=val_raw_cache, cfg=cfg, lookups=lookups,
             norm_stats=norm_stats, split_role=split, telescope=telescope,
         )
-        DatasetCache.from_transition_dataset(val_dataset, split=split).save(val_cache_path)
+        TransitionDatasetCache.from_transition_dataset(val_dataset, split=split).save(val_cache_path)
 
     # Build with the dataset's expanded names so filter-dependent features
     # (sky_brightness_g, urgency_r, ...) appear in active_features and can be inverted.
@@ -172,15 +172,15 @@ def build_evaluators(
         # Bin runs start each night at the expert's first field; field runs start at the zenith row.
         nightgroup = nightgroup.apply(lambda x: x.iloc[1:], include_groups=False).reset_index(level=0).reset_index(drop=True).groupby('night')
 
-    night_start_bin_states = None
-    if cfg.data.bin_state_dim > 0 and not field_level:
+    night_start_candidate_states = None
+    if cfg.data.candidate_state_dim > 0 and not field_level:
         cur = val_dataset._df.iloc[val_dataset.current_state_idxs].reset_index(drop=True)
         night_start_indices = cur.index[cur['field'] == 'zenith'].values + 1
-        night_start_bin_states = val_dataset._prenorm_bin_states[night_start_indices].detach().numpy()
+        night_start_candidate_states = val_dataset._prenorm_candidate_states[night_start_indices].detach().numpy()
 
     env = HistoricBlancoEnv(
         cfg=cfg, constraints_cfg=ActionConstraints(), lookups=lookups,
-        global_pd_nightgroup=nightgroup, night_start_bin_states=night_start_bin_states,
+        global_pd_nightgroup=nightgroup, night_start_candidate_states=night_start_candidate_states,
         norm_stats=norm_stats, telescope=telescope, zenith_start=field_level,
     )
 
@@ -243,25 +243,25 @@ class Evaluator(ABC):
         compact_idx = self.data.dataset.curr_compact_idxs[idx]
 
         x_glob = self.data.dataset.states[compact_idx].unsqueeze(0).to(self.device)
-        x_bin  = self.data.dataset.bin_states[compact_idx].unsqueeze(0).to(self.device)
+        x_cand = self.data.dataset.candidate_states[compact_idx].unsqueeze(0).to(self.device)
         self.policy.core_net.to(self.device)
         x_glob.requires_grad_(True)
-        x_bin.requires_grad_(True)
+        x_cand.requires_grad_(True)
 
-        scores = self.policy.core_net(x_glob, x_bin)
+        scores = self.policy.core_net(x_glob, x_cand)
         target = scores[0].max()
         self.policy.core_net.zero_grad()
         target.backward()
 
-        bin_grads = x_bin.grad[0].abs().mean(dim=0)
-        peak = bin_grads.max().item()
-        for i, name in enumerate(self.data.dataset.bin_feature_names):
-            print(f'Feature: {name:30} | Gradient: {bin_grads[i].item() / peak:.6f}')
+        cand_grads = x_cand.grad[0].abs().mean(dim=0)
+        peak = cand_grads.max().item()
+        for i, name in enumerate(self.data.dataset.candidate_feature_names):
+            print(f'Feature: {name:30} | Gradient: {cand_grads[i].item() / peak:.6f}')
 
     # def plot_layer1_weights(self, ax=None):
     #     if ax is None:
     #         _, ax = plt.subplots(figsize=(20, 5))
-    #     names = self.data.dataset.global_feature_names + self.data.dataset.bin_feature_names
+    #     names = self.data.dataset.global_feature_names + self.data.dataset.candidate_feature_names
     #     weights = self.policy.core_net.net[0].weight.data.cpu().detach().numpy()
     #     means = weights.mean(axis=0)
     #     stds  = weights.std(axis=0)
@@ -278,11 +278,11 @@ class Evaluator(ABC):
     def plot_mollweide_res(self):
         self.plotter.plot_mollweide_res(
             timestamps=self.data.agent_df['timestamp'].values,
-            expert_bin_idxs=self.data.expert_df['bin_idx'],
-            agent_bin_idxs=self.data.agent_df['bin_idx'],
+            expert_bin_idxs=self.data.expert_df['candidate_idx'],
+            agent_bin_idxs=self.data.agent_df['candidate_idx'],
             field_pos=np.array([(self.data.lookups.fields.ra[fid], self.data.lookups.fields.dec[fid])
                                 for fid in range(len(self.data.lookups.fields.index))]),
-            nside=self.data.hpGrid.nside,
+            nside=self.data.candidate_grid.nside,
         )
 
     def plot_hist_comparison(self, feature_name, density=True, bins=20, use_weights=False, ax=None):
@@ -470,10 +470,10 @@ class SingleStepEvaluator(Evaluator):
         self.visible_bin_masks = visible_bin_masks
 
     def run(self) -> None:
-        agent_bin_idxs, agent_filter_idxs, agent_field_ids = self._batch_single_step()
+        agent_cand_idxs, agent_filter_idxs, agent_field_ids = self._batch_single_step()
         timestamps = self.data.expert_df['timestamp'].astype(int)
 
-        self.data.populate_agent_df(agent_bin_idxs, agent_filter_idxs, timestamps,
+        self.data.populate_agent_df(agent_cand_idxs, agent_filter_idxs, timestamps,
                                     field_ids=agent_field_ids)
         # IMPORTANT: convert agent_df to deg BEFORE computing errors so both
         # dataframes share units inside populate_errors_df.
@@ -502,10 +502,10 @@ class SingleStepEvaluator(Evaluator):
             sl = slice(i * chunk, None if i == n_slices - 1 else (i + 1) * chunk)
             idxs = compact_idxs[sl]
             glob  = dataset.states[idxs].to(self.device)
-            bins  = dataset.bin_states[idxs].to(self.device) if dataset.include_bin_features else None
+            cands = dataset.candidate_states[idxs].to(self.device) if dataset.include_candidate_features else None
             masks = dataset.action_masks[idxs].to(self.device)
             with torch.no_grad():
-                scores = self.policy.core_net(glob, bins) if need_scores else None
+                scores = self.policy.core_net(glob, cands) if need_scores else None
                 if filter_first:
                     visible = torch.as_tensor(
                         self.visible_bin_masks[sl], device=self.device, dtype=torch.bool
@@ -514,46 +514,46 @@ class SingleStepEvaluator(Evaluator):
                     ff_bin_outputs.append(b_idx.cpu())
                     ff_filter_outputs.append(f_idx.cpu())
                 else:
-                    action_outputs.append(self.policy.select_action(glob, bins, masks))
+                    action_outputs.append(self.policy.select_action(glob, cands, masks))
                 if self.field_choice_method == 'interp' and not field_level:
                     score_outputs.append(scores.cpu())
 
         if filter_first:
-            bin_idxs    = torch.cat(ff_bin_outputs).numpy()
+            cand_idxs   = torch.cat(ff_bin_outputs).numpy()
             filter_idxs = torch.cat(ff_filter_outputs).numpy()
         else:
-            bin_idxs = torch.cat(action_outputs).cpu().detach().numpy()
+            cand_idxs = torch.cat(action_outputs).cpu().detach().numpy()
             if do_filter:
-                filter_idxs = bin_idxs % _NUM_FILTERS
-                bin_idxs    = bin_idxs // _NUM_FILTERS
+                filter_idxs = cand_idxs % _NUM_FILTERS
+                cand_idxs   = cand_idxs // _NUM_FILTERS
             else:
                 filter_idxs = None
 
-        # Log active-bin coverage diagnostic (fraction of bins with no sentinel features)
-        active_bin_mask = getattr(dataset, 'active_bin_mask', None)
-        if active_bin_mask is not None:
+        # Log active-candidate coverage diagnostic (fraction of candidates with no sentinel features)
+        active_candidate_mask = getattr(dataset, 'active_candidate_mask', None)
+        if active_candidate_mask is not None:
             logger.debug(
-                f"Active bin coverage: {float(active_bin_mask.float().mean()):.3f}"
+                f"Active candidate coverage: {float(active_candidate_mask.float().mean()):.3f}"
             )
 
         if field_level:
             # Candidates are fields: the chosen candidate index is the field id.
-            return bin_idxs, filter_idxs, bin_idxs
+            return cand_idxs, filter_idxs, cand_idxs
         if self.field_choice_method != 'interp':
-            return bin_idxs, filter_idxs, None
+            return cand_idxs, filter_idxs, None
 
         field_ids = self._choose_fields_interp(
-            bin_idxs, filter_idxs, torch.cat(score_outputs).numpy(),
+            cand_idxs, filter_idxs, torch.cat(score_outputs).numpy(),
         )
-        return bin_idxs, filter_idxs, field_ids
+        return cand_idxs, filter_idxs, field_ids
 
     def _choose_fields_interp(self, bin_idxs, filter_idxs, all_scores):
         """For each chosen bin, pick the best field via Q-value interpolation."""
-        n_bins    = self.data.dataset.nbins
+        n_bins    = self.data.dataset.n_candidates
         n_filters = all_scores.shape[-1] // n_bins
-        lon_data  = self.data.hpGrid.lon
-        lat_data  = self.data.hpGrid.lat
-        is_azel   = self.data.hpGrid.is_azel
+        lon_data  = self.data.candidate_grid.lon
+        lat_data  = self.data.candidate_grid.lat
+        is_azel   = self.data.candidate_grid.is_azel
 
         fids_all = self.data.lookups.fields.index.values
         ra_all   = self.data.lookups.fields['ra'].values
@@ -565,7 +565,7 @@ class SingleStepEvaluator(Evaluator):
         # Precompute static bin→fields map for equatorial grids.
         static_map = None
         if not is_azel:
-            bids = self.data.hpGrid.ang2idx(lon=ra_all, lat=dec_all)
+            bids = self.data.candidate_grid.ang2idx(lon=ra_all, lat=dec_all)
             static_map = defaultdict(list)
             for fid, bid in zip(fids_all, bids):
                 static_map[int(bid)].append(int(fid))
@@ -580,7 +580,7 @@ class SingleStepEvaluator(Evaluator):
             if is_azel:
                 # Project all field RA/Dec to az/el at this observation's timestamp.
                 az_all, el_all = _ephemerides.equatorial_to_topographic(ra_all, dec_all, time=float(ts))
-                bids_j = self.data.hpGrid.ang2idx(lon=az_all, lat=el_all)
+                bids_j = self.data.candidate_grid.ang2idx(lon=az_all, lat=el_all)
                 bin_map_j = defaultdict(list)
                 for fid, b in zip(fids_all, bids_j):
                     if b is not None:  # field not observable at this timestamp
@@ -646,8 +646,9 @@ class SingleStepEvaluator(Evaluator):
             plot_type=plot_type, bins=bins, alpha=alpha, density=density, ax=ax,
         )
 
-    def plot_cdf_pointing_error(self, per_filter=False, use_bin=False):
-        return self.plotter.plot_cdf_pointing_error(self.data.expert_df, self.data.errors_df, per_filter=per_filter, use_bin=use_bin)
+    def plot_cdf_pointing_error(self, per_filter=False, use_candidate=False):
+        return self.plotter.plot_cdf_pointing_error(self.data.expert_df, self.data.errors_df, per_filter=per_filter,
+                                                    use_candidate=use_candidate)
 
     def plot_quiver(self, feature_x, feature_y, ax=None):
         self._check_input_features(feature_x, feature_y)
@@ -724,12 +725,14 @@ class MultiStepEvaluator(Evaluator):
             with open(metrics_path, 'wb') as f:
                 pickle.dump(self.eval_metrics, f)
 
-        ts, bin_idxs, filter_idxs, field_ids, glob_df, bin_feat_dict = \
+        ts, bin_idxs, filter_idxs, field_ids, glob_df, candidate_feat_dict = \
             self._process_eval_metrics(self.eval_metrics)
 
+        # Field candidates are indexed by field id; the schedule's bin is grid bookkeeping only.
+        candidate_idxs = field_ids if is_field_level(self.data.action_space) else bin_idxs
         self.data.populate_agent_df(
-            bin_idxs=bin_idxs, filter_idxs=filter_idxs, timestamps=ts,
-            field_ids=field_ids, glob_df=glob_df, bin_feat_dict=bin_feat_dict,
+            candidate_idxs=candidate_idxs, filter_idxs=filter_idxs, timestamps=ts,
+            field_ids=field_ids, glob_df=glob_df, candidate_feat_dict=candidate_feat_dict,
         )
 
     def _process_eval_metrics(self, eval_metrics):
@@ -774,11 +777,11 @@ class MultiStepEvaluator(Evaluator):
         glob_df['night'] = night_col
         del glob_arr
 
-        # Bin features: stream per feature to avoid holding a full
-        # (nfeats, total_rows, nbins) intermediate AND a full per-feature
+        # Candidate features: stream per feature to avoid holding a full
+        # (nfeats, total_rows, n_candidates) intermediate AND a full per-feature
         # dict at the same time.
-        feat_names = self.data.dataset.bin_feature_names
-        bin_feat_dict = {}
+        feat_names = self.data.dataset.candidate_feature_names
+        candidate_feat_dict = {}
         # Materialize the full (total_rows, nbins, nfeats) array once in float32
         # — we still need it, but at least at fp32 not fp64.
         bin_obs_all = np.concatenate(
@@ -795,7 +798,7 @@ class MultiStepEvaluator(Evaluator):
 
         for i, name in enumerate(feat_names):
             # arr[valid, :, i] copies; assign and move on.
-            bin_feat_dict[name] = bin_obs_all[valid, :, i].copy()
+            candidate_feat_dict[name] = bin_obs_all[valid, :, i].copy()
         del bin_obs_all
         _gc.collect()
 
@@ -805,7 +808,7 @@ class MultiStepEvaluator(Evaluator):
             filter_arr[valid],
             field_arr[valid],
             glob_df[valid],
-            bin_feat_dict,
+            candidate_feat_dict,
         )
 
     def _process_eval_metrics_from_manifest(self, manifest):
@@ -845,7 +848,7 @@ class MultiStepEvaluator(Evaluator):
         del frames, full_df
 
         feat_names_glob = self.data.dataset.global_feature_names
-        feat_names_bin  = self.data.dataset.bin_feature_names
+        feat_names_cand = self.data.dataset.candidate_feature_names
 
         # ---- Pass 2: obs features from companion _obs.npz files ----
         # Path convention: nights/ep-N_night-K.csv → nights/ep-N_night-K_obs.npz
@@ -865,27 +868,29 @@ class MultiStepEvaluator(Evaluator):
         glob_df['night'] = night_col
         del glob_arr
 
-        # ---- Pass 2b: bin_observations, streamed per night ----
+        # ---- Pass 2b: candidate_observations, streamed per night ----
+        # Runs written before the bin -> candidate rename store them as bin_observations
         with np.load(first_npz, mmap_mode='r') as npz:
-            nbins = npz['bin_observations'].shape[1]
-        bin_feat_dict = {
-            name: np.empty((n_rows, nbins), dtype=np.float32)
-            for name in feat_names_bin
+            cand_key = 'candidate_observations' if 'candidate_observations' in npz else 'bin_observations'
+            n_candidates = npz[cand_key].shape[1]
+        candidate_feat_dict = {
+            name: np.empty((n_rows, n_candidates), dtype=np.float32)
+            for name in feat_names_cand
         }
         row_offset = 0
         for n in night_keys:
             npz_path = Path(manifest[n])
             npz_path = npz_path.parent / (npz_path.stem + '_obs.npz')
             with np.load(npz_path) as npz:
-                bin_obs = np.asarray(npz['bin_observations'], dtype=np.float32)
-            n_night = bin_obs.shape[0]
-            for i, name in enumerate(feat_names_bin):
-                bin_feat_dict[name][row_offset:row_offset + n_night] = bin_obs[:, :, i]
-            del bin_obs
+                cand_obs = np.asarray(npz[cand_key], dtype=np.float32)
+            n_night = cand_obs.shape[0]
+            for i, name in enumerate(feat_names_cand):
+                candidate_feat_dict[name][row_offset:row_offset + n_night] = cand_obs[:, :, i]
+            del cand_obs
             row_offset += n_night
             _gc.collect()
 
-        return ts_arr, bin_arr, filter_arr, field_arr, glob_df, bin_feat_dict
+        return ts_arr, bin_arr, filter_arr, field_arr, glob_df, candidate_feat_dict
 
     # ---- MS-specific plots ------------------------------------------
 

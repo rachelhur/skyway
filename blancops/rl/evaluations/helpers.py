@@ -70,7 +70,7 @@ def dump_filter_q_breakdown(policy, obs, info, idx2filter=None):
     Args
     ----
     policy : trained flat-score policy exposing ``core_net`` and ``num_filters``.
-    obs : dict with ``global_state`` and ``bin_state`` arrays.
+    obs : dict with ``global_state`` and ``candidate_state`` arrays.
     info : dict with ``action_mask`` and ``visible_bin_mask``.
     idx2filter : optional mapping from filter index to a printable label.
 
@@ -83,12 +83,12 @@ def dump_filter_q_breakdown(policy, obs, info, idx2filter=None):
 
     device = next(policy.parameters()).device
     x_glob = torch.as_tensor(obs['global_state'], device=device, dtype=torch.float32).unsqueeze(0)
-    x_bin = torch.as_tensor(obs['bin_state'], device=device, dtype=torch.float32).unsqueeze(0)
+    x_cand = torch.as_tensor(obs['candidate_state'], device=device, dtype=torch.float32).unsqueeze(0)
 
     num_filters = policy.num_filters
     with torch.no_grad():
-        raw_scores = policy.core_net(x_glob, x_bin)
-    n_bins = x_bin.shape[1]
+        raw_scores = policy.core_net(x_glob, x_cand)
+    n_bins = x_cand.shape[1]
     q_map = raw_scores.view(n_bins, num_filters).cpu()
 
     avail = torch.as_tensor(info['action_mask'], dtype=torch.bool).view(n_bins, num_filters)

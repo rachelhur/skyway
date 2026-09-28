@@ -84,7 +84,7 @@ class Trainer:
             raise ValueError("Validation dataloader is empty! Check dataset split logic.")
 
     def fit(self, num_epochs, batch_size, trainloader, valloader, patience=10,
-            train_log_freq=10, hpGrid=None, norm_stats=None, start_epoch=None):
+            train_log_freq=10, candidate_grid=None, norm_stats=None, start_epoch=None):
 
         if (self.overwrite or self.hard_overwrite) and start_epoch > 0:
             raise ValueError("Cannot overwrite checkpoints and resume from a previous epoch.")
@@ -152,7 +152,7 @@ class Trainer:
 
                 # Train step -- currently logs at each epoch
                 log_metrics = i_step % steps_per_epoch == 0
-                train_metrics_dict = self.algorithm.train_step(batch, epoch_num=i_epoch, hpGrid=hpGrid, compute_metrics=log_metrics)
+                train_metrics_dict = self.algorithm.train_step(batch, epoch_num=i_epoch, candidate_grid=candidate_grid, compute_metrics=log_metrics)
                 if log_metrics:
                     for k, v in train_metrics_dict.items():
                         train_metrics[k].append(v)
@@ -167,7 +167,7 @@ class Trainer:
                         num_val_batches = len(valloader)
 
                         for eval_batch in valloader:
-                            batch_metrics = self.algorithm.val_step(eval_batch, hpGrid)
+                            batch_metrics = self.algorithm.val_step(eval_batch, candidate_grid)
                             for k, v in batch_metrics.items():
                                 val_metric_sums[k] += v
 
@@ -194,7 +194,7 @@ class Trainer:
                         if ckpt_vals is None:
                             logger.warning(
                                 f"Checkpoint metric '{metric_key}' not in val metrics "
-                                f"(hpGrid missing?); skipping improvement check."
+                                f"(candidate_grid missing?); skipping improvement check."
                             )
                             improved = False
                         else:

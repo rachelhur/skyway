@@ -35,7 +35,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         lookups,
         norm_stats,
         global_pd_nightgroup,
-        night_start_bin_states: Optional[np.ndarray] = None,
+        night_start_candidate_states: Optional[np.ndarray] = None,
         telescope=None,
         zenith_start: bool = False,
         replay_mode: bool = False,
@@ -50,7 +50,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         )
         self._groupbynight = global_pd_nightgroup
         self._night_keys = list(global_pd_nightgroup.groups.keys())
-        self._night_start_bin_states = night_start_bin_states
+        self._night_start_candidate_states = night_start_candidate_states
         # zenith_start: each night starts parked at zenith at its first row's time (the dataset's zenith row),
         # instead of at the expert's first field. replay_mode: accept expert commands outside the mask.
         self._zenith_start = zenith_start
@@ -140,8 +140,8 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         night_id = self._night_keys[night_idx]
         night_cfg = self._get_night_config(night_idx)
 
-        if self._night_start_bin_states is not None and self.include_bin_features:
-            self._bin_state = self._night_start_bin_states[night_idx]
+        if self._night_start_candidate_states is not None and self.include_candidate_features:
+            self._candidate_state = self._night_start_candidate_states[night_idx]
 
         counts_lookup = (
             self.lookups.night2fidfilt_visit_hist

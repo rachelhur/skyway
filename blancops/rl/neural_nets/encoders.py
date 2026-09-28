@@ -3,13 +3,13 @@ from torch import nn
 
 
 class DeepSetsStateEncoder(nn.Module):
-    def __init__(self, glob_dim, bin_dim, hidden_dim, output_dim):
+    def __init__(self, glob_dim, cand_dim, hidden_dim, output_dim):
         super().__init__()
         self.glob_enc = nn.Sequential(
             nn.Linear(glob_dim, hidden_dim), nn.ReLU()
         )
-        self.bin_enc = nn.Sequential(
-            nn.Linear(bin_dim, hidden_dim), nn.ReLU()
+        self.cand_enc = nn.Sequential(
+            nn.Linear(cand_dim, hidden_dim), nn.ReLU()
         )
         # mean + max pool doubles the pooled dim
         self.fusion = nn.Sequential(
@@ -18,12 +18,12 @@ class DeepSetsStateEncoder(nn.Module):
             nn.ReLU()
         )
 
-    def forward(self, x_glob, x_bin):
+    def forward(self, x_glob, x_cand):
         g = self.glob_enc(x_glob)                    # (B, H)
-        b = self.bin_enc(x_bin)                      # (B, M, H)
-        b_mean = b.mean(dim=1)                       # (B, H)
-        b_max  = b.max(dim=1).values                 # (B, H)
-        x = torch.cat([g, b_mean, b_max], dim=-1)   # (B, 3H)
+        c = self.cand_enc(x_cand)                    # (B, M, H)
+        c_mean = c.mean(dim=1)                       # (B, H)
+        c_max  = c.max(dim=1).values                 # (B, H)
+        x = torch.cat([g, c_mean, c_max], dim=-1)   # (B, 3H)
         return self.fusion(x)                        # (B, output_dim)
     
 class FlatStateEncoder(nn.Module):

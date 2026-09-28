@@ -349,14 +349,14 @@ class EvaluationPlotter:
         return ax
 
     def plot_cdf_pointing_error(self, expert_df, errors_df, tolerance_deg=5.0,
-                                per_filter=False, use_bin=False, label_fontsize=20):
+                                per_filter=False, use_candidate=False, label_fontsize=20):
         FIG_SIZE = (5.5, 3.8)
 
         fig, ax = plt.subplots(figsize=FIG_SIZE)
         max_x = 0.0
         error_key = 'angular_separation'
-        if use_bin:
-            error_key = 'bin_' + error_key
+        if use_candidate:
+            error_key = 'candidate_' + error_key
         if per_filter:
             for i, filt in enumerate(FILTER2IDX.keys()):
                 mask = (expert_df['filter'] == filt).values

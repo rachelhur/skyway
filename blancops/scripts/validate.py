@@ -55,7 +55,7 @@ def main():
         log_to_stdout=True,
         log_to_file=True,
         outdir=outdir,
-        filename='validation.log',
+        filename='evaluation.log',
         use_tqdm=True
     )
 

@@ -16,12 +16,16 @@ import argparse
 import logging
 from pathlib import Path
 
-from blancops.configs.paths import feature_cache_dir, lookups_dir, workspace
-from blancops.data.feature_cache import RawFeatureCache
+from blancops.configs.paths import feature_cache_dir, field_feature_cache_dir, lookups_dir, workspace
+from blancops.data.feature_cache import FieldFeatureCache, BinFeatureCache
 from blancops.data.lookup_tables import TrainLookupTables
-from blancops.data.preprocessing import load_and_process_historic_data
+from blancops.data.preprocessing import find_interruptions, load_and_process_historic_data, preprocess_fits
 from blancops.ephemerides import ephemerides
 from blancops.io.logger_utils import configure_logger
+from blancops.configs.constants import _FIELD_FEATURES
+from blancops.configs.experiment_schema import ActionConstraints
+from blancops.data.features.field_features import label_mask_report
+from blancops.telescope.registry import get_telescope
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +59,36 @@ def get_args():
 
     parser.add_argument('--test', action='store_true', help='Run in test mode with reduced data.')
     parser.add_argument('--field_features', action='store_true',
-                        help='Compute field-level features into an existing cache directory (field_filter runs).')
+                        help='Build the standalone field feature cache (field_filter runs) from the FITS archive.')
     parser.add_argument('--interruptions_only', action='store_true',
                         help='Only write the interruptions file into an existing cache directory.')
     return parser.parse_args()
+
+
+def compute_field_cache(outdir: Path, df, lookups, interruptions) -> None:
+    """Build the standalone field feature cache and report expert labels outside the field mask.
+
+    Parameters
+    ----------
+    outdir : Path
+        Field feature cache directory.
+    df : pd.DataFrame
+        Processed survey exposures.
+    lookups : LookupTables
+        Survey lookups.
+    interruptions : pd.DataFrame
+        Interrupted survey exposures.
+    """
+    logger.info(f"Computing the field feature cache into {outdir}")
+    FieldFeatureCache.compute(outdir, df, lookups, _FIELD_FEATURES, interruptions=interruptions)
+    cache = FieldFeatureCache.load(outdir, mmap=True)
+    constraints = ActionConstraints()
+    report = label_mask_report(
+        cache.global_df, cache.current_state_idxs, cache.next_state_idxs, cache.field_features,
+        cache.field_feature_names, lookups.fields['dec'].to_numpy(), get_telescope('blanco'),
+        min(constraints.airmass_limit, constraints.airmass_failsafe),
+    )
+    logger.info(f"Expert labels outside their own field-level mask: {report}")
 
 
 def main():
@@ -75,8 +105,23 @@ def main():
     lookup_dir = lookups_dir(args.data_dir)
     outdir = feature_cache_dir(args.data_dir, args.nside, is_azel)
 
-    logger.info(f"Loading and processing historical data from {fits_path}")
-    df = load_and_process_historic_data(fits_path=fits_path)
+    logger.info(f"Loading the full exposure archive from {fits_path}")
+    archive_df = preprocess_fits(fits_path)
+    df = load_and_process_historic_data(df=archive_df.copy())
+    interruptions = find_interruptions(df, archive_df)
+    logger.info(f"Found {len(interruptions)} survey exposures preceded by other archived exposures.")
+
+    if args.field_features:
+        compute_field_cache(field_feature_cache_dir(args.data_dir), df, TrainLookupTables.load_from_dir(lookup_dir),
+                            interruptions)
+        return
+
+    if args.interruptions_only:
+        if not BinFeatureCache.exists(outdir):
+            raise FileNotFoundError(f"No feature cache at {outdir}; run the full precompute first.")
+        BinFeatureCache.save_interruptions(outdir, interruptions)
+        logger.info(f"Wrote interruptions to {outdir}")
+        return
 
     if args.test:
         logger.info("Running in test mode: using only the first 1000 rows of data.")
@@ -89,7 +134,8 @@ def main():
     hpGrid = ephemerides.HealpixGrid(nside=args.nside, is_azel=is_azel)
 
     logger.info("Computing feature cache…")
-    cache = RawFeatureCache.compute(df=df, lookups=lookups, hpGrid=hpGrid)
+    cache = BinFeatureCache.compute(df=df, lookups=lookups, hpGrid=hpGrid)
+    cache.interruptions = interruptions
 
 
     if not args.test:
