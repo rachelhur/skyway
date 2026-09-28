@@ -55,6 +55,10 @@ class WorkspacePaths:
         return self.root / "deployable_models"
 
     @property
+    def model_comparison(self) -> Path:
+        return self.experiments / "model_comparison"
+
+    @property
     def data(self) -> Path:
         return self.root / "data"
 
