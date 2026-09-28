@@ -66,6 +66,7 @@ def build_evaluators(
     style: PlotStyle = None,
     save_movie=False,
     save_mollweide=False,
+    plot_bins=False,
     data_dir=None,
     action_decoding='joint',
     split: str = 'val',
@@ -80,6 +81,7 @@ def build_evaluators(
         style: Plot style.
         save_movie: Whether the multi-step runner saves movies.
         save_mollweide: Whether the multi-step runner saves Mollweide frames.
+        plot_bins: Whether movies of field-level models also draw HEALPix bins (bin-level models always do).
         data_dir: Override for the feature cache root.
         action_decoding: 'joint' or 'filter_first'.
         split: Which split to evaluate, 'val' or 'test'.
@@ -162,7 +164,7 @@ def build_evaluators(
         agent=agent, policy=agent.policy, cfg=cfg,
         lookups=lookups, num_episodes=1, outdir=ms_outdir,
         save_SISPI=False, save_state_features=True,
-        save_movie=save_movie, save_mollweide=save_mollweide
+        save_movie=save_movie, save_mollweide=save_mollweide, plot_bins=plot_bins,
     )
 
     # Environment for MS evaluator
@@ -276,14 +278,42 @@ class Evaluator(ABC):
     # ---- Common plot pass-throughs ----------------------------------
 
     def plot_mollweide_res(self):
+        expert_df, agent_df = self.data.expert_df, self.data.agent_df
+        times = dict(expert_times=expert_df['timestamp'].to_numpy(), agent_times=agent_df['timestamp'].to_numpy())
+        if not is_field_level(self.data.action_space):
+            self.plotter.plot_mollweide_res(
+                **times,
+                expert_bin_idxs=expert_df['candidate_idx'].to_numpy(),
+                agent_bin_idxs=agent_df['candidate_idx'].to_numpy(),
+                nside=self.data.candidate_grid.nside,
+            )
+            return
         self.plotter.plot_mollweide_res(
-            timestamps=self.data.agent_df['timestamp'].values,
-            expert_bin_idxs=self.data.expert_df['candidate_idx'],
-            agent_bin_idxs=self.data.agent_df['candidate_idx'],
-            field_pos=np.array([(self.data.lookups.fields.ra[fid], self.data.lookups.fields.dec[fid])
-                                for fid in range(len(self.data.lookups.fields.index))]),
-            nside=self.data.candidate_grid.nside,
+            **times,
+            expert_field_pos=self._field_radec(expert_df['candidate_idx'].to_numpy()),
+            agent_field_pos=self._field_radec(agent_df['candidate_idx'].to_numpy()),
         )
+
+    def _field_radec(self, field_ids):
+        """Field centers in radians, NaN for the zenith sentinel (the DataFrame ra/dec columns are in degrees).
+
+        Parameters
+        ----------
+        field_ids : np.ndarray
+            Field id per observation, ZENITH_FIELD_ID (-1) for zenith rows.
+
+        Returns
+        -------
+        np.ndarray
+            (n_obs, 2) (ra, dec) in radians.
+        """
+        fields = self.data.lookups.fields
+        ids = np.asarray(field_ids, dtype=int)                 # [n_obs]
+        valid = ids >= 0
+        pos = np.full((len(ids), 2), np.nan)                   # [n_obs, 2]
+        pos[valid, 0] = fields['ra'].to_numpy()[ids[valid]]
+        pos[valid, 1] = fields['dec'].to_numpy()[ids[valid]]
+        return pos
 
     def plot_hist_comparison(self, feature_name, density=True, bins=20, use_weights=False, ax=None):
         return self.plotter.plot_hist_comparison(

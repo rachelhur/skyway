@@ -12,7 +12,7 @@ from blancops.ephemerides import ephemerides
 from blancops.configs.constants import *
 import logging
 
-from blancops.plotting.plotting import plot_bins_movie, plot_fields_movie, plot_schedule_whole
+from blancops.plotting.plotting import plot_schedule_movie, plot_schedule_whole
 from blancops.configs.enums import grid_is_azel, is_field_level
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ _PROGRAM_PLACEHOLDER = 'ai-scheduler-test'
 class OfflineRunner:
     def __init__(self, agent, policy, cfg, lookups, num_episodes=1,
                  outdir=None, save_SISPI=True, SISPI_fn="sispi.json",
-                 save_state_features=False, save_movie=False, save_mollweide=False,
+                 save_state_features=False, save_movie=False, save_mollweide=False, plot_bins=False,
                  reset_counts_on_exhaustion=False, # whether or not to reset all counts after all targets complete
                  dump_moonset_q=False):
         self.agent = agent
@@ -35,6 +35,9 @@ class OfflineRunner:
         self.num_episodes = num_episodes
         self.lookups = lookups
         self.field_level = is_field_level(cfg.data.action_space)
+        # Bin-level models always draw bins; field-level models draw them in movies only when plot_bins
+        self._movie_bins = plot_bins or not self.field_level
+        self._mollweide_bins = not self.field_level
         self.field_choice_method = self.agent.field_choice_method
         self.outdir = Path(outdir)
         self.save_movie = save_movie
@@ -168,31 +171,39 @@ class OfflineRunner:
             for fid in fids
         ]
 
+    def _bin_idxs_from_df(self, df, draw_bins):
+        """HEALPix bin per schedule row when the plot draws bins, else None (fields only).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Schedule rows with a bin_id column.
+        draw_bins : bool
+            Whether the plot draws the bin layer.
+
+        Returns
+        -------
+        np.ndarray or None
+            Bin index per row, shape (n_rows,), or None.
+        """
+        return df[SCHEDULE_KEYS['bin_id']].values if draw_bins else None
+
     def _save_movie(self, df, ep_num, night_key):
-        outfile = self._plots_dir / f'ep-{ep_num}_{night_key}_movie.gif'
-        if self.field_level:
-            plot_fields_movie(
-                outfile=outfile,
-                times=df[SCHEDULE_KEYS['timestamp']].values,
-                field_pos=self._field_pos_from_df(df),
-            )
-            return
-        plot_bins_movie(
-            outfile=outfile,
-            nside=self.cfg.data.nside,
+        plot_schedule_movie(
+            outfile=str(self._plots_dir / f'ep-{ep_num}_{night_key}_movie.gif'),
             times=df[SCHEDULE_KEYS['timestamp']].values,
-            idxs=df[SCHEDULE_KEYS['bin_id']].values,
             field_pos=self._field_pos_from_df(df),
+            bin_idxs=self._bin_idxs_from_df(df, self._movie_bins),
+            nside=self.cfg.data.nside,
             is_azel=grid_is_azel(self.cfg.data.action_space),
         )
 
     def _save_mollweide(self, df, ep_num):
-        outfile = self._plots_dir / f'ep-{ep_num}_full_survey_mollweide.png'
         plot_schedule_whole(
-            outfile=outfile,
+            outfile=self._plots_dir / f'ep-{ep_num}_full_survey_mollweide.png',
             times=df[SCHEDULE_KEYS['timestamp']].values,
             field_pos=self._field_pos_from_df(df),
-            bin_idxs=None if self.field_level else df[SCHEDULE_KEYS['bin_id']].values,
+            bin_idxs=self._bin_idxs_from_df(df, self._mollweide_bins),
             nside=self.cfg.data.nside,
         )
 

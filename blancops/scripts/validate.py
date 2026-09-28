@@ -27,6 +27,8 @@ def main():
     parser.add_argument('--action_decoding', type=str, default='joint', choices=['joint', 'filter_first'], help='Action decoding strategy to use.')
     parser.add_argument('--save_movies', action='store_true', help='Whether to save movie files.')
     parser.add_argument('--save_mollweides', action='store_true', help='Whether to save movie files.')
+    parser.add_argument('--plot_bins', action='store_true',
+                        help='Also draw HEALPix bins in movies of field-level models (bin-level models always draw them).')
     parser.add_argument('--split', type=str, default='test', choices=['val', 'test'],
                         help='Which split to evaluate.')
 
@@ -69,6 +71,7 @@ def main():
         eval_outdir=eval_subdir,
         save_movie=args.save_movies,
         save_mollweide=args.save_mollweides,
+        plot_bins=args.plot_bins,
         action_decoding=args.action_decoding,
         split=args.split,
     )
