@@ -16,6 +16,7 @@ from blancops.plotting.plotting import plot_schedule_from_file
 from collections import defaultdict
 from blancops.ephemerides.ephemerides import topographic_to_equatorial
 from blancops.math import units
+from blancops.configs.enums import grid_is_azel
 
 def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_ortho, action_space, nside, fid2radec_filepath):
     if do_fieldbin:
@@ -28,7 +29,7 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
             whole=False,
             compare=False,
             expert=False,
-            is_azel='azel' in action_space,
+            is_azel=grid_is_azel(action_space),
             mollweide=False,
         )
     if do_bin:
@@ -41,7 +42,7 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
             whole=False,
             compare=False,
             expert=False,
-            is_azel='azel' in action_space,
+            is_azel=grid_is_azel(action_space),
             mollweide=False,
         ) 
 
@@ -58,7 +59,7 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
                     whole=True,
                     compare=True,
                     expert=True,
-                    is_azel='azel' in action_space,
+                    is_azel=grid_is_azel(action_space),
                     mollweide=True,
                 )  
             if do_ortho:
@@ -71,14 +72,14 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
                     whole=True,
                     compare=True,
                     expert=True,
-                    is_azel='azel' in action_space,
+                    is_azel=grid_is_azel(action_space),
                     mollweide=False,
                 )  
 
 def save_survey_diagnostics(eval_metrics, save_dir, field_lookup, nside, action_space, ep_num=0):
     eval_metrics = eval_metrics[f'ep-{ep_num}']
     _preflat_metrics = defaultdict(list)
-    hpGrid = HealpixGrid(nside=nside, is_azel='azel' in action_space)
+    hpGrid = HealpixGrid(nside=nside, is_azel=grid_is_azel(action_space))
 
     # Extract the arrays from each night
     for night_key, metrics_dict in eval_metrics.items():

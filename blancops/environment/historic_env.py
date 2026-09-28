@@ -8,7 +8,7 @@ import numpy as np
 from blancops.environment.base import StateSnapshot
 from blancops.environment.seeing_model import PredictiveSeeingModel
 from blancops.data.features.glob_features import get_night_boundaries
-from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER
+from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER, ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER_IDX
 
 import logging
 
@@ -37,6 +37,8 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         global_pd_nightgroup,
         night_start_bin_states: Optional[np.ndarray] = None,
         telescope=None,
+        zenith_start: bool = False,
+        replay_mode: bool = False,
     ):
         super().__init__(
             cfg=cfg,
@@ -49,6 +51,10 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         self._groupbynight = global_pd_nightgroup
         self._night_keys = list(global_pd_nightgroup.groups.keys())
         self._night_start_bin_states = night_start_bin_states
+        # zenith_start: each night starts parked at zenith at its first row's time (the dataset's zenith row),
+        # instead of at the expert's first field. replay_mode: accept expert commands outside the mask.
+        self._zenith_start = zenith_start
+        self._replay_mode = replay_mode
 
         # Per-night feature context.
         self._survey_night_idx = 0  # set per-night in _get_night_config
@@ -102,9 +108,12 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             # survey-position features.
             self._survey_night_idx = night_idx
 
-        field_id = int(first_row["field_id"])
-        filter_idx = int(first_row["filter_idx"])
-        bin_num = int(first_row["bin"])
+        if self._zenith_start:
+            field_id, filter_idx, bin_num = ZENITH_FIELD_ID, ZENITH_FILTER_IDX, ZENITH_BIN_NUM
+        else:
+            field_id = int(first_row["field_id"])
+            filter_idx = int(first_row["filter_idx"])
+            bin_num = int(first_row["bin"])
 
         night2ot = self.lookups.night2ot_clock_seconds
         if night2ot is None:
@@ -118,7 +127,9 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             "end_ts":     last_row["timestamp"],
             "sunset_ts":  sunset_ts,
             "sunrise_ts": sunrise_ts,
-            "ot_at_sunset": int(night2ot[first_row["night"]]),
+            # Field runs keep the exact OT clock value, as the offline features do.
+            "ot_at_sunset": (float(night2ot[first_row["night"]]) if self.field_level
+                             else int(night2ot[first_row["night"]])),
             "field_id":   field_id,
             "filter_idx": filter_idx,
             "bin_num":    bin_num,
@@ -191,7 +202,8 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         night_df = self._groupbynight.get_group(night_key)
         model = PredictiveSeeingModel(self.cfg.data.seeing)
         fwhm_vals = night_df['fwhm'].to_numpy(dtype=float)
-        valid = ~np.isnan(fwhm_vals)
+        # Zenith rows are start states, not exposures: they carry no measurement.
+        valid = ~np.isnan(fwhm_vals) & (night_df['field_id'].to_numpy() != ZENITH_FIELD_ID)
         if valid.any():
             filt = night_df['filter_idx'].to_numpy()[valid]
             bands = [IDX2FILTER.get(int(f), FWHM_REF_FILTER) for f in filt]

@@ -133,6 +133,22 @@ def feature_cache_dir(data_dir: Path, nside: int, is_azel: bool) -> Path:
     return Path(data_dir) / f"feature_cache_nside{nside}_{coord}"
 
 
+def field_feature_cache_dir(data_dir: Path) -> Path:
+    """Field-level feature cache directory (field_filter runs); independent of any HEALPix grid.
+
+    Parameters
+    ----------
+    data_dir : Path
+        Data directory (e.g. workspace().des_data).
+
+    Returns
+    -------
+    Path
+        <data_dir>/feature_cache_field.
+    """
+    return Path(data_dir) / "feature_cache_field"
+
+
 # ------------------------------------------------------------------ #
 # Package resources                                                  #
 # ------------------------------------------------------------------ #

@@ -4,11 +4,12 @@ import logging
 
 from blancops.configs.constants import _FILTER_DEP_FEATURE_NAMES, FILTER2IDX
 from blancops.configs.experiment_schema import NormalizationConfig
+from blancops.configs.enums import has_filter
 
 logger = logging.getLogger(__name__)
 
 def build_normalizer(state_feature_names, cfg):
-    norm_kwargs = build_normalizer_kwargs(cfg.data.norm, 'filter' in cfg.data.action_space)
+    norm_kwargs = build_normalizer_kwargs(cfg.data.norm, has_filter(cfg.data.action_space))
     return StateNormalizer(state_feature_names=state_feature_names, **norm_kwargs)
 
 def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> dict:

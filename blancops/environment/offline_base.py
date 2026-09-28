@@ -114,6 +114,25 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
                 return
         self._is_new_night = False
 
+    def align_exposure_start(self, exposure_ts: float, field_id: int, filter_idx: int) -> None:
+        """Set the clock so the next exposure of (field_id, filter_idx) starts at ``exposure_ts`` (replay checks).
+
+        The clock is set to ``exposure_ts`` minus the slew and filter-change dead time from the current pointing,
+        so the simulated exposure start equals the archived one and the clock cannot drift from the archive.
+
+        Parameters
+        ----------
+        exposure_ts : float
+            Archived exposure start (Unix seconds).
+        field_id : int
+            Field about to be observed.
+        filter_idx : int
+            Filter about to be used.
+        """
+        distance = self._slew_distance(self._field_id, field_id)
+        filter_change = self._filter_idx != ZENITH_FILTER_IDX and self._filter_idx != filter_idx
+        self._ts = float(exposure_ts) - self._get_dead_time(distance, filter_change)
+
     def _skip_downtime(self, ts: float) -> float:
         """Advance past any downtime intervals.
         """

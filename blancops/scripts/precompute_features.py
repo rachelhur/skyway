@@ -54,6 +54,10 @@ def get_args():
     )
 
     parser.add_argument('--test', action='store_true', help='Run in test mode with reduced data.')
+    parser.add_argument('--field_features', action='store_true',
+                        help='Compute field-level features into an existing cache directory (field_filter runs).')
+    parser.add_argument('--interruptions_only', action='store_true',
+                        help='Only write the interruptions file into an existing cache directory.')
     return parser.parse_args()
 
 

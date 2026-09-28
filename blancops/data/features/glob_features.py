@@ -373,16 +373,14 @@ class GlobalFeatureEngineer:
         # df['field_id'] = df['field'].map({v: k for k, v in self.fid2name.items()})
         df['field_id'] = df['field'].map({v: k for k, v in self.lookups.fields['field'].to_dict().items()})
 
+        zenith_mask = df['field'] == 'zenith'
         if self.hpGrid is not None:
             lon = df['az'] if self.hpGrid.is_azel else df['ra']
             lat = df['el'] if self.hpGrid.is_azel else df['dec']
 
             df['bin'] = self.hpGrid.ang2idx(lon=lon, lat=lat)
-
-            # Re-assign zenith specifics
-            zenith_mask = df['field'] == 'zenith'
             df.loc[zenith_mask, "bin"] = ZENITH_BIN_NUM
-            df.loc[zenith_mask, "field_id"] = ZENITH_FIELD_ID
+        df.loc[zenith_mask, "field_id"] = ZENITH_FIELD_ID
 
         return df
 

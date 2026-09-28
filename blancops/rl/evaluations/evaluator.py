@@ -28,12 +28,12 @@ logger = logging.getLogger(__name__)
 from collections import defaultdict
 
 from blancops.configs.constants import FILTER2IDX, _NUM_FILTERS
-from blancops.configs.paths import RunPaths, feature_cache_dir, lookups_dir, workspace
+from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, workspace
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
 from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
 from blancops.data.dataset import TransitionDataset
-from blancops.data.feature_cache import RawFeatureCache, DatasetCache
+from blancops.data.feature_cache import FieldFeatureCache, RawFeatureCache, DatasetCache
 from blancops.data.norm_stats import NormStats
 from blancops.data.splits import NightSplit
 from blancops.data.features.normalizations import build_normalizer
@@ -52,6 +52,7 @@ from .data_container import (
     SingleStepDataContainer,
 )
 from .plotters import FILTER_COLORS, EvaluationPlotter, PlotStyle
+from blancops.configs.enums import grid_is_azel, has_filter, is_field_level
 
 
 # ----------------------------------------------------------------------
@@ -110,12 +111,15 @@ def build_evaluators(
     lookups = TrainLookupTables.load_from_dir(lookups_dir(workspace().des_data))
     val_cache_path = run_paths.dataset_cache(split)
     _data_dir = Path(data_dir) if data_dir is not None else workspace().des_data
-    cache_dir = feature_cache_dir(_data_dir, cfg.data.nside, is_azel='azel' in cfg.data.action_space)
+    field_level_cache = is_field_level(cfg.data.action_space)
+    cache_cls = FieldFeatureCache if field_level_cache else RawFeatureCache
+    cache_dir = (field_feature_cache_dir(_data_dir) if field_level_cache
+                 else feature_cache_dir(_data_dir, cfg.data.nside, is_azel=grid_is_azel(cfg.data.action_space)))
 
     if DatasetCache.exists(val_cache_path):
         val_dataset = DatasetCache.load(val_cache_path)
     else:
-        if not RawFeatureCache.exists(cache_dir):
+        if not cache_cls.exists(cache_dir):
             raise FileNotFoundError(
                 f"Neither {split} dataset cache ({val_cache_path}) nor feature cache "
                 f"({cache_dir}) found."
@@ -130,7 +134,8 @@ def build_evaluators(
                 f"No {split} nights found in {split_json} or in the config; "
                 f"cannot reconstruct the {split} dataset."
             )
-        full_cache = RawFeatureCache.load(cache_dir, mmap_bin=True)
+        full_cache = (FieldFeatureCache.load(cache_dir, mmap=True) if field_level_cache
+                      else RawFeatureCache.load(cache_dir, mmap_bin=True))
         val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
             cache=val_raw_cache, cfg=cfg, lookups=lookups,
@@ -161,11 +166,14 @@ def build_evaluators(
     )
 
     # Environment for MS evaluator
+    field_level = is_field_level(cfg.data.action_space)
     nightgroup = val_dataset._df.groupby('night')
-    nightgroup = nightgroup.apply(lambda x: x.iloc[1:], include_groups=False).reset_index(level=0).reset_index(drop=True).groupby('night')
+    if not field_level:
+        # Bin runs start each night at the expert's first field; field runs start at the zenith row.
+        nightgroup = nightgroup.apply(lambda x: x.iloc[1:], include_groups=False).reset_index(level=0).reset_index(drop=True).groupby('night')
 
     night_start_bin_states = None
-    if cfg.data.bin_state_dim > 0:
+    if cfg.data.bin_state_dim > 0 and not field_level:
         cur = val_dataset._df.iloc[val_dataset.current_state_idxs].reset_index(drop=True)
         night_start_indices = cur.index[cur['field'] == 'zenith'].values + 1
         night_start_bin_states = val_dataset._prenorm_bin_states[night_start_indices].detach().numpy()
@@ -173,7 +181,7 @@ def build_evaluators(
     env = HistoricBlancoEnv(
         cfg=cfg, constraints_cfg=ActionConstraints(), lookups=lookups,
         global_pd_nightgroup=nightgroup, night_start_bin_states=night_start_bin_states,
-        norm_stats=norm_stats, telescope=telescope,
+        norm_stats=norm_stats, telescope=telescope, zenith_start=field_level,
     )
 
     # Containers + plotters + evaluators
@@ -190,6 +198,8 @@ def build_evaluators(
     # Precompute per-sample visible-bin masks for filter_first single-step
     # decoding, aligned to the SS timestamps used for field placement.
     ss_visible_masks = None
+    if action_decoding == 'filter_first' and is_field_level(action_space):
+        raise ValueError("action_decoding 'filter_first' is not supported for action_space 'field_filter'.")
     if action_decoding == 'filter_first' and 'filter' in action_space:
         ss_ts = ss_data.expert_df['timestamp'].to_numpy(dtype=float)
         ss_visible_masks = np.stack(
@@ -482,10 +492,11 @@ class SingleStepEvaluator(Evaluator):
 
         dataset = self.data.dataset
 
-        do_filter = 'filter' in self.data.action_space
+        do_filter = has_filter(self.data.action_space)
+        field_level = is_field_level(self.data.action_space)
         filter_first = (self.action_decode == 'filter_first' and do_filter
                         and self.visible_bin_masks is not None)
-        need_scores = self.field_choice_method == 'interp' or filter_first
+        need_scores = (self.field_choice_method == 'interp' and not field_level) or filter_first
 
         for i in range(n_slices):
             sl = slice(i * chunk, None if i == n_slices - 1 else (i + 1) * chunk)
@@ -504,7 +515,7 @@ class SingleStepEvaluator(Evaluator):
                     ff_filter_outputs.append(f_idx.cpu())
                 else:
                     action_outputs.append(self.policy.select_action(glob, bins, masks))
-                if self.field_choice_method == 'interp':
+                if self.field_choice_method == 'interp' and not field_level:
                     score_outputs.append(scores.cpu())
 
         if filter_first:
@@ -525,6 +536,9 @@ class SingleStepEvaluator(Evaluator):
                 f"Active bin coverage: {float(active_bin_mask.float().mean()):.3f}"
             )
 
+        if field_level:
+            # Candidates are fields: the chosen candidate index is the field id.
+            return bin_idxs, filter_idxs, bin_idxs
         if self.field_choice_method != 'interp':
             return bin_idxs, filter_idxs, None
 

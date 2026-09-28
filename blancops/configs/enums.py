@@ -34,9 +34,26 @@ def is_autoregressive(network: Network) -> bool:
 class ActionSpace(str, Enum):
     AZEL_FILTER = 'azel_filter'
     RADEC_FILTER = 'radec_filter'
+    FIELD_FILTER = 'field_filter'
     FILTER = 'filter' # Not functional
     AZEL = 'azel'
     RADEC = 'radec'
+
+
+def is_field_level(action_space: str) -> bool:
+    """Whether actions are (survey field, filter) pairs rather than (bin, filter) pairs."""
+    return action_space == ActionSpace.FIELD_FILTER
+
+
+def has_filter(action_space: str) -> bool:
+    """Whether the filter is part of the action."""
+    return action_space in (ActionSpace.AZEL_FILTER, ActionSpace.RADEC_FILTER,
+                            ActionSpace.FIELD_FILTER, ActionSpace.FILTER)
+
+
+def grid_is_azel(action_space: str) -> bool:
+    """Whether the HEALPix grid and feature cache are az/el; field-level runs share the az/el global cache."""
+    return action_space in (ActionSpace.AZEL_FILTER, ActionSpace.AZEL, ActionSpace.FIELD_FILTER)
 
 
 class RewardTerm(str, Enum):

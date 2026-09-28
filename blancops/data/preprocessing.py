@@ -101,7 +101,7 @@ def load_and_process_historic_data(
     selections (dict): dict
         Selection criteria for the dataframe. Currently only supports equal, greater than, less than.
     """
-    assert fits_path or df, "Provide either fits_path or df, not both."
+    assert (fits_path is None) != (df is None), "Provide either fits_path or df, not both."
     if df is None:
         df = preprocess_fits(fits_path)
 
@@ -118,6 +118,44 @@ def load_and_process_historic_data(
     df = df.sort_values(by='timestamp').reset_index(drop=True)
 
     return df
+
+def find_interruptions(survey_df: pd.DataFrame, archive_df: pd.DataFrame) -> pd.DataFrame:
+    """Survey exposures preceded, since the previous survey exposure of the night, by any other archived exposure.
+
+    Exposure numbers increase with time, so an archived exposure strictly between two consecutive survey
+    exposures of a night means the telescope pointed elsewhere in between. The pointing and filter of the
+    last such exposure are where the next survey slew starts.
+
+    Parameters
+    ----------
+    survey_df : pd.DataFrame
+        Selected survey exposures with expnum and night.
+    archive_df : pd.DataFrame
+        Every archived exposure (all programs) with expnum, ra and dec in degrees, and filter.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per interrupted survey exposure: expnum, interrupt_ra, interrupt_dec (radians),
+        interrupt_filter.
+    """
+    arch = archive_df[['expnum', 'ra', 'dec', 'filter']].dropna(subset=['expnum']).sort_values('expnum')
+    arch_exp = arch['expnum'].to_numpy(dtype=np.int64)
+    survey = survey_df[['expnum', 'night']].sort_values('expnum')
+    cur = survey['expnum'].to_numpy(dtype=np.int64)
+    prev = survey.groupby('night', sort=False)['expnum'].shift(1).to_numpy()
+    last_idx = np.searchsorted(arch_exp, cur, side='left') - 1
+    has_prev = ~np.isnan(prev)
+    last_exp = np.where(last_idx >= 0, arch_exp[np.clip(last_idx, 0, None)], -1)
+    interrupted = has_prev & (last_exp > np.nan_to_num(prev, nan=np.inf))
+    last = arch.iloc[last_idx[interrupted]]
+    return pd.DataFrame({
+        'expnum': cur[interrupted],
+        'interrupt_ra': last['ra'].to_numpy(dtype=float) * units.deg,
+        'interrupt_dec': last['dec'].to_numpy(dtype=float) * units.deg,
+        'interrupt_filter': last['filter'].astype(str).to_numpy(),
+    })
+
 
 def _apply_selection_criteria(df, selections: list):
     sel_mask = np.ones(len(df), dtype=bool)

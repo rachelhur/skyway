@@ -962,6 +962,55 @@ def plot_schedule_whole(
     return
 
 
+def _lookup_field_pos(field_ids, field_id2pos):
+    """
+    Map a column of field ids to (ra, dec) positions.
+
+    Field ids read from a schedule csv are floats when the column holds missing
+    values, so they are matched against the mapping both as-written and coerced
+    to an integer key.
+
+    Arguments
+    ---------
+    field_ids : pandas.Series
+        Field ids for each observation.
+    field_id2pos : dict
+        Maps field id (as a string key) to (ra, dec) in radians.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape (n_obs, 2) holding (ra, dec) in radians, with NaN where
+        the field id was missing from the mapping.
+    """
+    positions = []
+    n_missing = 0
+    for fid in field_ids.values:
+        pos = field_id2pos.get(str(fid))
+        if pos is None:
+            try:
+                pos = field_id2pos.get(str(int(float(fid))))
+            except (TypeError, ValueError):
+                pos = None
+        if pos is None:
+            n_missing += 1
+            pos = [np.nan, np.nan]
+        positions.append(pos)
+
+    if n_missing == len(positions):
+        raise KeyError(
+            "None of the %i field ids were found in the field mapping; "
+            "check that the mapping matches the schedule." % len(positions)
+        )
+    if n_missing:
+        print(
+            "Warning: %i of %i field ids missing from the field mapping."
+            % (n_missing, len(positions))
+        )
+
+    return np.asarray(positions, dtype=float)
+
+
 def plot_schedule_from_file(
     outfile,
     schedule_file,
@@ -1094,15 +1143,11 @@ def plot_schedule_from_file(
     if field_ids_1 is None or field_id2pos is None:
         field_pos_1 = None
     else:
-        field_pos_1 = np.asarray(
-            [field_id2pos.get(str(fid), [None, None]) for fid in field_ids_1.values]
-        )
+        field_pos_1 = _lookup_field_pos(field_ids_1, field_id2pos)
     if field_ids_2 is None or field_id2pos is None:
         field_pos_2 = None
     else:
-        field_pos_2 = np.asarray(
-            [field_id2pos.get(str(fid), [None, None]) for fid in field_ids_2.values]
-        )
+        field_pos_2 = _lookup_field_pos(field_ids_2, field_id2pos)
     bin_ids_1 = schedule.get(f"{primary_prefix}_bin_id", None)
     bin_ids_2 = schedule.get(f"{alternate_prefix}_bin_id", None) if compare else None
 

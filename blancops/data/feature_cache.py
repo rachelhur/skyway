@@ -28,6 +28,7 @@ from blancops.configs.constants import (
     _BIN_FEATURES,
     _CYCLICAL_FEATURE_NAMES,
     _GLOBAL_FEATURES,
+    ZENITH_FIELD_ID,
 )
 from blancops.data.features.bin_features import BinFeatureEngineer
 from blancops.data.features.glob_features import GlobalFeatureEngineer
@@ -123,7 +124,11 @@ class RawFeatureCache:
         bin_features.npy: (n_rows, n_bins, n_bin_feats) float32; memmap-friendly
         transitions.npz: compressed arrays: state_idxs, current_state_idxs,
                               next_state_idxs, slew_distances
+        interruptions.parquet: optional; survey exposures (by expnum) interrupted by other
+                              archived exposures, with the interrupting pointing and filter
     """
+
+    INTERRUPTIONS_FILE = 'interruptions.parquet'
 
     nside: int
     is_azel: bool
@@ -141,6 +146,9 @@ class RawFeatureCache:
     current_state_idxs: np.ndarray
     next_state_idxs: np.ndarray
     slew_distances: np.ndarray  # (n_transitions,) float32
+
+    # Interrupted survey exposures keyed by expnum; None when the cache has no interruptions file
+    interruptions: Optional[pd.DataFrame] = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -276,6 +284,7 @@ class RawFeatureCache:
             current_state_idxs=current_state_idxs,
             next_state_idxs=next_state_idxs,
             slew_distances=slew_distances,
+            interruptions=self.interruptions,
         )
 
     # ------------------------------------------------------------------
@@ -312,7 +321,22 @@ class RawFeatureCache:
             next_state_idxs=self.next_state_idxs,
             slew_distances=self.slew_distances,
         )
+        if self.interruptions is not None:
+            self.save_interruptions(cache_dir, self.interruptions)
         logger.info(f"RawFeatureCache saved to {cache_dir}")
+
+    @classmethod
+    def save_interruptions(cls, cache_dir: Path, interruptions: pd.DataFrame) -> None:
+        """Write the interruptions file into a cache directory, alongside an existing cache.
+
+        Parameters
+        ----------
+        cache_dir : Path
+            Cache directory.
+        interruptions : pd.DataFrame
+            Output of ``preprocessing.find_interruptions``.
+        """
+        interruptions.to_parquet(Path(cache_dir) / cls.INTERRUPTIONS_FILE, index=False)
 
     @classmethod
     def load(cls, cache_dir: Path, mmap_bin: bool = False,
@@ -352,6 +376,8 @@ class RawFeatureCache:
             current_state_idxs=t['current_state_idxs'],
             next_state_idxs=t['next_state_idxs'],
             slew_distances=t['slew_distances'],
+            interruptions=(pd.read_parquet(cache_dir / cls.INTERRUPTIONS_FILE)
+                           if (cache_dir / cls.INTERRUPTIONS_FILE).exists() else None),
         )
 
         if start_date is not None or end_date is not None:
@@ -405,6 +431,211 @@ class RawFeatureCache:
 
 
 # ---------------------------------------------------------------------------
+# FieldFeatureCache -- field-level candidates
+# ---------------------------------------------------------------------------
+
+def _field_slew_distances(df: pd.DataFrame, current_state_idxs, next_state_idxs, ra, dec) -> np.ndarray:
+    """Angular slew distance per transition between field centers (radians); zenith rows use the zenith then.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Global frame with field_id and timestamp.
+    current_state_idxs, next_state_idxs : np.ndarray
+        Transition row indices.
+    ra, dec : np.ndarray
+        Field centers in radians, indexed by field_id.
+
+    Returns
+    -------
+    np.ndarray
+        float32 distances.
+    """
+    from blancops.ephemerides import ephemerides as _eph
+
+    def centers(rows):
+        fids = df['field_id'].to_numpy()[rows].astype(int)
+        lon, lat = ra[np.clip(fids, 0, None)].copy(), dec[np.clip(fids, 0, None)].copy()
+        for i in np.where(fids == ZENITH_FIELD_ID)[0]:
+            lon[i], lat[i] = _eph.blanco_observer(time=float(df['timestamp'].iloc[rows[i]])).radec_of('0', '90')
+        return np.array((lon, lat))
+
+    return geometry.angular_separation(centers(current_state_idxs), centers(next_state_idxs)).astype(np.float32)
+
+
+@dataclass
+class FieldFeatureCache:
+    """Raw (unnormalized) field-level features for the field_filter action space, independent of any HEALPix grid.
+
+    Disk layout (under ``cache_dir/``):
+
+        metadata.json: global and field feature names, n_rows, n_fields
+        global_df.parquet: enriched DataFrame with all global feature columns (no bin column)
+        field_features.npy: (n_rows, n_fields, n_field_feats) float32; memmap-friendly
+        field_tiling.npz: per-row valid-only global_mean_tiling (overall and per filter)
+        transitions.npz: state_idxs, current_state_idxs, next_state_idxs, slew_distances (field centers)
+        interruptions.parquet: survey exposures (by expnum) interrupted by other archived exposures
+    """
+
+    FIELD_FEATURES_FILE = 'field_features.npy'
+    FIELD_TILING_FILE = 'field_tiling.npz'
+    INTERRUPTIONS_FILE = 'interruptions.parquet'
+    _FILES = ('metadata.json', 'global_df.parquet', FIELD_FEATURES_FILE, FIELD_TILING_FILE, 'transitions.npz')
+
+    global_df: pd.DataFrame
+    global_feature_names: List[str]
+    field_features: np.ndarray
+    field_feature_names: List[str]
+    field_tiling: dict
+    state_idxs: np.ndarray
+    current_state_idxs: np.ndarray
+    next_state_idxs: np.ndarray
+    slew_distances: np.ndarray
+    interruptions: Optional[pd.DataFrame] = None
+
+    @classmethod
+    def compute(cls, cache_dir: Path, df: pd.DataFrame, lookups, base_features: list[str],
+                interruptions: Optional[pd.DataFrame] = None) -> None:
+        """Build the cache from a processed survey DataFrame and write it to ``cache_dir``.
+
+        Field features are filled into a temporary disk memmap that gets its real name only when complete.
+
+        Parameters
+        ----------
+        cache_dir : Path
+            Output directory.
+        df : pd.DataFrame
+            Survey exposures from ``load_and_process_historic_data``.
+        lookups : LookupTables
+            Survey lookups.
+        base_features : list of str
+            Field feature base names.
+        interruptions : pd.DataFrame or None
+            Output of ``preprocessing.find_interruptions``.
+        """
+        from blancops.data.features.field_features import FieldFeatureEngineer
+        from blancops.data.features.normalizations import expand_feature_set
+
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        glob_eng = GlobalFeatureEngineer(
+            lookups=lookups, hpGrid=None, base_features=_GLOBAL_FEATURES,
+            cyclical_features=_CYCLICAL_FEATURE_NAMES, do_cyclical_norm=True, do_filt=True,
+        )
+        global_df = glob_eng.transform(df)
+        global_feature_names = [f for f in expand_feature_set(_GLOBAL_FEATURES, _CYCLICAL_FEATURE_NAMES, do_filt=True)
+                                if f in global_df.columns]
+
+        eng = FieldFeatureEngineer(lookups, base_features)
+        tmp_path = cache_dir / f"{cls.FIELD_FEATURES_FILE}.tmp"
+        out = np.lib.format.open_memmap(tmp_path, mode='w+', dtype=np.float32,
+                                        shape=(len(global_df), len(eng.grid.lon), len(eng.feature_names)))
+        _, tiling = eng.transform(global_df, out=out)
+        out.flush()
+        del out
+        tmp_path.replace(cache_dir / cls.FIELD_FEATURES_FILE)
+
+        state_idxs, current_state_idxs, next_state_idxs, _ = _get_state_indices(global_df)
+        slew = _field_slew_distances(global_df, current_state_idxs, next_state_idxs, eng.grid.lon, eng.grid.lat)
+        global_df.to_parquet(cache_dir / 'global_df.parquet', index=True)
+        np.savez_compressed(cache_dir / cls.FIELD_TILING_FILE, **tiling)
+        np.savez_compressed(cache_dir / 'transitions.npz', state_idxs=state_idxs,
+                            current_state_idxs=current_state_idxs, next_state_idxs=next_state_idxs,
+                            slew_distances=slew)
+        if interruptions is not None:
+            interruptions.to_parquet(cache_dir / cls.INTERRUPTIONS_FILE, index=False)
+        with open(cache_dir / 'metadata.json', 'w') as f:
+            json.dump({'global_feature_names': global_feature_names, 'field_feature_names': eng.feature_names,
+                       'n_rows': int(len(global_df)), 'n_fields': int(len(eng.grid.lon))}, f, indent=2)
+        logger.info(f"FieldFeatureCache saved to {cache_dir}")
+
+    @classmethod
+    def exists(cls, cache_dir: Path) -> bool:
+        """Whether ``cache_dir`` holds a complete field feature cache."""
+        return all((Path(cache_dir) / f).exists() for f in cls._FILES)
+
+    @classmethod
+    def load(cls, cache_dir: Path, mmap: bool = True, start_date: str | None = None,
+             end_date: str | None = None) -> 'FieldFeatureCache':
+        """Load from disk, optionally restricted to a date range.
+
+        Parameters
+        ----------
+        cache_dir : Path
+            Directory written by ``compute``.
+        mmap : bool
+            Memory-map the field features (read-only).
+        start_date, end_date : str or None
+            Inclusive night bounds ('YYYY-MM-DD').
+
+        Returns
+        -------
+        FieldFeatureCache
+            The cache.
+        """
+        cache_dir = Path(cache_dir)
+        with open(cache_dir / 'metadata.json') as f:
+            meta = json.load(f)
+        t = np.load(cache_dir / 'transitions.npz')
+        interruptions_path = cache_dir / cls.INTERRUPTIONS_FILE
+        cache = cls(
+            global_df=pd.read_parquet(cache_dir / 'global_df.parquet'),
+            global_feature_names=meta['global_feature_names'],
+            field_features=np.load(cache_dir / cls.FIELD_FEATURES_FILE, mmap_mode='r' if mmap else None),
+            field_feature_names=meta['field_feature_names'],
+            field_tiling=dict(np.load(cache_dir / cls.FIELD_TILING_FILE)),
+            state_idxs=t['state_idxs'], current_state_idxs=t['current_state_idxs'],
+            next_state_idxs=t['next_state_idxs'], slew_distances=t['slew_distances'],
+            interruptions=pd.read_parquet(interruptions_path) if interruptions_path.exists() else None,
+        )
+        if start_date is not None or end_date is not None:
+            all_nights = pd.to_datetime(cache.global_df['night'].unique())
+            nights = _nights_in_date_range(all_nights, start_date, end_date)
+            if len(nights) < len(all_nights):
+                cache = cache.filter_nights(nights, label='date range')
+        return cache
+
+    nights_in_range = RawFeatureCache.nights_in_range
+
+    def log_transition_filter_stats(self, nights, label: str = '') -> None:
+        """Log how many transitions the time-diff filter removes for ``nights``."""
+        mask = self.global_df['night'].astype(str).isin({str(n) for n in nights})
+        _get_state_indices(self.global_df[mask].reset_index(drop=True), label=label)
+
+    def filter_nights(self, nights, label: str = '') -> 'FieldFeatureCache':
+        """A new cache restricted to ``nights``, with indices local to the filtered frame.
+
+        Parameters
+        ----------
+        nights : iterable
+            Night strings to keep.
+        label : str
+            Log label.
+
+        Returns
+        -------
+        FieldFeatureCache
+            The filtered cache.
+        """
+        mask = self.global_df['night'].astype(str).isin({str(n) for n in nights})
+        filtered_df = self.global_df[mask].reset_index(drop=True)
+        if len(filtered_df) == 0:
+            raise ValueError(f"filter_nights: no rows matched nights {set(nights)}")
+        pos = np.where(mask.values)[0]
+        state_idxs, current_state_idxs, next_state_idxs, _ = _get_state_indices(filtered_df, label=label)
+        # Slews are a function of the two rows, so recompute them on the filtered transitions.
+        full_next = dict(zip(self.next_state_idxs.tolist(), self.slew_distances.tolist()))
+        slew = np.array([full_next[int(pos[i])] for i in next_state_idxs], dtype=np.float32)
+        return FieldFeatureCache(
+            global_df=filtered_df, global_feature_names=self.global_feature_names,
+            field_features=self.field_features[pos], field_feature_names=self.field_feature_names,
+            field_tiling={k: v[pos] for k, v in self.field_tiling.items()},
+            state_idxs=state_idxs, current_state_idxs=current_state_idxs, next_state_idxs=next_state_idxs,
+            slew_distances=slew, interruptions=self.interruptions,
+        )
+
+
+# ---------------------------------------------------------------------------
 # DatasetCache
 # ---------------------------------------------------------------------------
 
@@ -453,6 +684,8 @@ class DatasetCache:
     nside: int
     is_azel: bool
     split: str = 'val'
+    # Field centers (RA, Dec) for field_filter datasets, whose candidates are fields; None for bin datasets
+    field_radec: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Properties for evaluator compatibility
@@ -490,6 +723,9 @@ class DatasetCache:
 
     @property
     def hpGrid(self):
+        if self.field_radec is not None:
+            from blancops.data.features.field_features import FieldGrid
+            return FieldGrid(self.field_radec[0], self.field_radec[1])
         from blancops.ephemerides import ephemerides as _eph
         return _eph.HealpixGrid(nside=self.nside, is_azel=self.is_azel)
 
@@ -533,6 +769,8 @@ class DatasetCache:
             nside=dataset.hpGrid.nside,
             is_azel=dataset.hpGrid.is_azel,
             split=split,
+            field_radec=(np.array([dataset.hpGrid.lon, dataset.hpGrid.lat])
+                         if getattr(dataset, 'field_level', False) else None),
         )
 
     # ------------------------------------------------------------------

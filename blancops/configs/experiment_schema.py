@@ -8,7 +8,7 @@ from typing import Any, List, Union, Literal, Dict
 import numpy as np
 from typing import Optional
 from blancops.configs.enums import *
-from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, _BIN_FEATURES
+from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, _BIN_FEATURES, _FIELD_FEATURES
 from blancops.configs.paths import RunPaths, workspace
 from blancops.configs.constants import FILTER2IDX
 from blancops.configs.constants import _ALLOWED_NORMS_PER_FEATURE, _NORM_TYPES
@@ -116,18 +116,31 @@ class BaseDataConfig(BaseModel):
 
     # Features
     global_features: List[str]
-    bin_features: List[str]
+    bin_features: List[str] = []
+    field_features: List[str] = []
 
     @model_validator(mode='after')
     def validate_features(self) -> 'TrainDataConfig':
         for bin_feat in self.bin_features:
             if bin_feat not in _BIN_FEATURES:
                 raise ValueError(f"{bin_feat} is not implemented.")
+        for field_feat in self.field_features:
+            if field_feat not in _FIELD_FEATURES:
+                raise ValueError(f"{field_feat} is not an implemented field feature.")
+        if is_field_level(self.action_space):
+            if self.bin_features:
+                raise ValueError("action_space 'field_filter' uses field_features; bin_features must be empty.")
+            if not self.field_features:
+                raise ValueError("action_space 'field_filter' requires field_features.")
+        elif self.field_features:
+            raise ValueError(f"field_features require action_space 'field_filter', got '{self.action_space}'.")
         return self
 
     @model_validator(mode='after')
     def validate_action_space_consistency(self) -> 'TrainDataConfig':
         # Validate that action_space is consistent with features
+        if self.action_space not in {a.value for a in ActionSpace}:
+            raise ValueError(f"Unknown action_space '{self.action_space}'.")
         has_filter = 'filter' in self.action_space
         has_radec = 'radec' in self.action_space
         has_azel = 'azel' in self.action_space
@@ -145,7 +158,7 @@ class BaseDataConfig(BaseModel):
                 pass
         else:
             # If no filter in action space, we shouldn't have filter-specific features
-            filter_features = [f for f in self.global_features + self.bin_features
+            filter_features = [f for f in self.global_features + self.bin_features + self.field_features
                              if any(filter_str in f for filter_str in _FILTER_DEP_FEATURE_NAMES)]
             if filter_features:
                 raise ValueError(f"Filter-specific features {filter_features} found but action_space '{self.action_space}' does not include 'filter'")
@@ -153,6 +166,8 @@ class BaseDataConfig(BaseModel):
         return self
 
 class TrainDataConfig(BaseDataConfig):
+    # Drop transitions interrupted by other archived exposures (needs the cache's interruptions file)
+    drop_interrupted: bool = True
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     years: List[int] = [2013, 2014, 2015, 2016, 2017, 2018, 2019] # full set of data
@@ -540,6 +555,11 @@ class ExperimentConfig(BaseModel):
                 f"action_space=FILTER only supports loss_strategy=PURE_JOINT, "
                 f"got {self.model.loss_strategy}"
             )
+        if is_field_level(self.data.action_space) and (
+            is_autoregressive(self.model.network)
+            or self.model.loss_strategy == ActionArchitecture.AUTOREGRESSIVE
+        ):
+            raise ValueError("action_space 'field_filter' does not support autoregressive networks or losses.")
         return self
 
     @model_validator(mode='after')

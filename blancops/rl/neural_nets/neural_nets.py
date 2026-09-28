@@ -34,14 +34,14 @@ class MLP(nn.Module):
         return self.net(x)
 
 class StateValueMLP(nn.Module):
-    """State-value network V(s) over the global state and the flattened bin states.
+    """State-value network V(s) over the global state and the flattened candidate (bin or field) states.
 
     Parameters
     ----------
     glob_dim : int
         Global state dimension D_glob.
     bin_dim : int
-        Flattened bin state dimension n_bins * D_bin; 0 when there are no bin features.
+        Flattened candidate state dimension n_candidates * D_candidate; 0 when there are none.
     hidden : tuple[int, ...]
         Hidden layer widths.
     layernorm : bool
@@ -77,7 +77,10 @@ class StateValueMLP(nn.Module):
 
 class ContextualScoreMLP(nn.Module):
     """
-    Scores each candidate from [encoded global state, candidate bin features].
+    Scores each candidate from [encoded global state, candidate features].
+
+    Candidates are the rows of `x_bin`: HEALPix bins for bin action spaces, survey fields for field_filter.
+    Rows are scored independently, so any number of candidates is accepted.
     """
 
     def __init__(self, global_dim: int, bin_feat_dim: int,

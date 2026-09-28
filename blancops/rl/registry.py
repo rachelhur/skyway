@@ -8,7 +8,10 @@ import torch
 from torch import nn
 
 from blancops.configs.experiment_schema import ExperimentConfig
-from blancops.configs.enums import _AUTOREGRESSIVE_NETWORKS, Algorithm, ActionArchitecture, Network, ActionSpace, is_autoregressive
+from blancops.configs.enums import (
+    _AUTOREGRESSIVE_NETWORKS, Algorithm, ActionArchitecture, Network, ActionSpace,
+    is_autoregressive, grid_is_azel, is_field_level
+)
 from blancops.rl.neural_nets.neural_nets import (
     ContextualScoreMLP,
     MLP,
@@ -277,10 +280,11 @@ def build_algorithm(cfg: ExperimentConfig, device: torch.device):
             # CQL-specific scaling.
             dist_matrix = None
             dist_scaling_factor = 0.0
-            dist_matrix = calculate_distance_matrix(
-                nside=cfg.data.nside,
-                is_azel='azel' in str(cfg.data.action_space),
-            )
+            if not is_field_level(cfg.data.action_space):
+                dist_matrix = calculate_distance_matrix(
+                    nside=cfg.data.nside,
+                    is_azel=grid_is_azel(cfg.data.action_space),
+                )
             q_max = 1.0 / (1.0 - cfg.model.gamma)
             dist_scaling_factor = q_max / torch.pi
             return CQL(

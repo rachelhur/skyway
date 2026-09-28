@@ -27,7 +27,7 @@ def main():
     parser.add_argument('--action_decoding', type=str, default='joint', choices=['joint', 'filter_first'], help='Action decoding strategy to use.')
     parser.add_argument('--save_movies', action='store_true', help='Whether to save movie files.')
     parser.add_argument('--save_mollweides', action='store_true', help='Whether to save movie files.')
-    parser.add_argument('--split', type=str, default='val', choices=['val', 'test'],
+    parser.add_argument('--split', type=str, default='test', choices=['val', 'test'],
                         help='Which split to evaluate.')
 
     args = parser.parse_args()

@@ -16,6 +16,8 @@ _FILTER_DEP_FEATURE_NAMES = [
     # bin features
     'min_tiling', 'num_unvisited_fields', 'num_incomplete_fields', 't_since_last_visit',
     'rel_min_tiling', 'rel_num_unvisited_fields', 'rel_num_incomplete_fields', 'rel_t_since_last_visit',
+    # field features
+    'completion', 'rel_completion',
     ]
 
 
@@ -91,6 +93,15 @@ _BIN_FEATURES = [
                             # resulting in loss of generality for future surveys
                             # rel_t_since_last_visit still suffers from a different spread,
                             # but much better off
+]
+
+
+# Per-field features for the field_filter action space (base names; completion and
+# t_since_last_visit expand per filter). Positional features are evaluated at field centers.
+_FIELD_FEATURES = [
+    "el", "airmass", "ha", "moon_distance", "sun_distance", "pointing_distance",
+    "delta_az", "delta_el", "t_until_set", "rel_ha", "rel_moon_distance",
+    "completion", "rel_completion", "t_since_last_visit",
 ]
 
 

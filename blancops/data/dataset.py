@@ -18,13 +18,16 @@ from blancops.data.rewards import combine_rewards, normalize_rewards, reward_nor
 from blancops.ephemerides import ephemerides
 from blancops.math import geometry, units
 
-from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_FIELD_ID, ZENITH_FILTER
+from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER
 
 from blancops.data.features.normalizations import StateNormalizer, build_normalizer_kwargs, setup_feature_names
 from blancops.data.splits import NightSplit, resolve_night_split
 from blancops.survey.profiles import DES
 from blancops.telescope.base import TelescopeProfile
 from blancops.telescope.registry import get_telescope
+from blancops.configs.enums import grid_is_azel, has_filter, is_field_level
+from blancops.configs.experiment_schema import ActionConstraints
+from blancops.data.features.field_features import FieldGrid, build_field_normalizer, expand_field_feature_names, field_norm_stats
 
 logger = logging.getLogger(__name__)
 
@@ -172,14 +175,18 @@ class TransitionDataset(torch.utils.data.Dataset):
         self._split_role = split_role
         self._setup_configuration(cfg, norm_kwargs)
         self.lookups = lookups
-        self.hpGrid = ephemerides.HealpixGrid(
-            nside=cfg.data.nside,
-            is_azel=('azel' in cfg.data.action_space),
-        )
+        if self.field_level: # XXX change self.hpGrid to self.grid
+            self.hpGrid = FieldGrid(lookups.fields['ra'].to_numpy(), lookups.fields['dec'].to_numpy())
+        else:
+            self.hpGrid = ephemerides.HealpixGrid(
+                nside=cfg.data.nside,
+                is_azel=grid_is_azel(cfg.data.action_space),
+            )
 
         self._load_from_cache(cache)
         self._build_transitions(cfg.data.action_space)
         self._apply_min_teff()
+        self._drop_interrupted()
         self._split_data(cfg)
         self._normalize_rewards()
         self._normalize_states(norm_kwargs)
@@ -193,12 +200,13 @@ class TransitionDataset(torch.utils.data.Dataset):
     def _setup_configuration(self, cfg, norm_kwargs):
         self._seeing_cfg = cfg.data.seeing
         self._min_teff = cfg.data.min_teff
+        self._drop_interrupted_transitions = getattr(cfg.data, 'drop_interrupted', False)
         self.reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
         self._calculate_action_mask = cfg.model.algorithm != 'bc' # expensive and not needed for bc
         self.include_bin_features = len(cfg.data.bin_features) > 0
 
         action_space = cfg.data.action_space
-        self.num_filters = _NUM_FILTERS if 'filter' in action_space else 1
+        self.num_filters = _NUM_FILTERS if has_filter(action_space) else 1
 
         # num_actions resolved after nbins is known from cache
         self._action_space_str = action_space
@@ -221,9 +229,18 @@ class TransitionDataset(torch.utils.data.Dataset):
             base_bin,
             norm_kwargs['cyclical_feature_names'],
             norm_kwargs['do_cyclical_norm'],
-            do_filt='filter' in action_space,
+            do_filt=has_filter(action_space),
         )
         self.do_local_mean_z_score = any('rel_' in name for name in self.bin_feature_names)
+
+        # field_filter
+        self.field_level = is_field_level(action_space)
+        if self.field_level:
+            self.bin_feature_names = expand_field_feature_names(list(cfg.data.field_features))
+            self.include_bin_features = True
+            self.do_local_mean_z_score = False
+            constraints = ActionConstraints()
+            self._airmass_limit = min(constraints.airmass_limit, constraints.airmass_failsafe)
 
     # ------------------------------------------------------------------
     # Load from cache
@@ -235,7 +252,13 @@ class TransitionDataset(torch.utils.data.Dataset):
             f"Global features missing from cache: {missing_global}. "
             "Re-run precompute-features."
         )
-        if self.include_bin_features:
+        if self.field_level:
+            if cache.field_features is None:
+                raise FileNotFoundError("field_filter needs field features in the cache; run "
+                                        "`precompute-train-features --field_features`.")
+            missing_field = set(self.bin_feature_names) - set(cache.field_feature_names)
+            assert not missing_field, f"Field features missing from cache: {missing_field}."
+        elif self.include_bin_features:
             missing_bin = set(self.bin_feature_names) - set(cache.bin_feature_names)
             assert not missing_bin, (
                 f"Bin features missing from cache: {missing_bin}. "
@@ -243,11 +266,24 @@ class TransitionDataset(torch.utils.data.Dataset):
             )
 
         self._df = cache.global_df
+        self._interruptions = getattr(cache, 'interruptions', None)
 
         if 'fwhm' in self.global_feature_names:
             self._df = _overwrite_fwhm_with_causal(self._df, self._seeing_cfg)
 
-        if self.include_bin_features:
+        if self.field_level:
+            field_indices = [cache.field_feature_names.index(f) for f in self.bin_feature_names]
+            self._prenorm_bin_states = _gather_bin_features(cache.field_features, cache.state_idxs, field_indices)
+            self._field_cache = cache
+            # global_mean_tiling from valid-only counts, matching field-level progress
+            self._df = self._df.copy()
+            for name, values in cache.field_tiling.items():
+                if name in self._df.columns:
+                    self._df[name] = values
+            # The candidate index on the field path is the field id (zenith rows keep the zenith sentinel).
+            fids = self._df['field_id'].to_numpy()
+            self._df['bin'] = np.where(fids == ZENITH_FIELD_ID, ZENITH_BIN_NUM, fids).astype(np.int64)
+        elif self.include_bin_features:
             bin_indices = [cache.bin_feature_names.index(f) for f in self.bin_feature_names]
             self._prenorm_bin_states = _gather_bin_features(
                 cache.bin_features, cache.state_idxs, bin_indices
@@ -302,6 +338,10 @@ class TransitionDataset(torch.utils.data.Dataset):
             num_states=len(self.state_idxs), state_idxs=self.state_idxs,
         )
 
+        if self.field_level and self._calculate_action_mask:
+            # Let each state allow the chosen expert action.
+            action_masks[self.curr_compact_idxs, actions] = True
+
         self.states = torch.as_tensor(states, dtype=torch.float32)
         self.actions = torch.as_tensor(actions, dtype=torch.int32)
         self.rewards = torch.as_tensor(rewards, dtype=torch.float32)
@@ -324,6 +364,29 @@ class TransitionDataset(torch.utils.data.Dataset):
             return
         keep = self._df['teff'].to_numpy()[self.next_state_idxs] > self._min_teff
         logger.info(f"min_teff={self._min_teff}: keeping {int(keep.sum())} of {len(keep)} transitions")
+        self._keep_transitions(keep)
+
+    def _drop_interrupted(self) -> None:
+        """Drop transitions whose exposure followed another archived exposure since the previous survey exposure.
+
+        The DES wide-field survey had program interruptions. When calculating transition quantities, need to drop these
+        observations. No-op when disabled or when the cache has no interruptions file;
+        dones are computed before dropping, as for min_teff.
+        """
+        if not self._drop_interrupted_transitions or self._interruptions is None:
+            return
+        keep = ~np.isin(self._df['expnum'].to_numpy()[self.next_state_idxs], self._interruptions['expnum'].to_numpy())
+        logger.info(f"drop_interrupted: keeping {int(keep.sum())} of {len(keep)} transitions")
+        self._keep_transitions(keep)
+
+    def _keep_transitions(self, keep: np.ndarray) -> None:
+        """Keep only the transitions where ``keep`` is True, across every per-transition array.
+
+        Parameters
+        ----------
+        keep : np.ndarray
+            Boolean mask over transitions.
+        """
         self.current_state_idxs = self.current_state_idxs[keep]
         self.next_state_idxs = self.next_state_idxs[keep]
         self.curr_compact_idxs = self.curr_compact_idxs[keep]
@@ -352,8 +415,15 @@ class TransitionDataset(torch.utils.data.Dataset):
         return df.iloc[state_idxs][self.global_feature_names].to_numpy()
 
     def _construct_actions(self, df, action_space, next_state_idxs):
-        assert action_space in ['radec', 'azel', 'radec_filter', 'azel_filter', 'filter']
+        assert action_space in ['radec', 'azel', 'radec_filter', 'azel_filter', 'field_filter', 'filter'] # XXX check if in ActionSpace Enum, not hard-coded
         next_state_df = df.iloc[next_state_idxs]
+
+        if is_field_level(action_space):
+            assert ZENITH_FILTER not in next_state_df['filter'].values, \
+                f"Invalid data: Found '{ZENITH_FILTER}' in next_state_df."
+            field_ids = next_state_df['field_id'].to_numpy().astype(np.int64)
+            filter_indices = next_state_df['filter'].map(FILTER2IDX).values.astype(np.int64)
+            return field_ids * _NUM_FILTERS + filter_indices
 
         if self.hpGrid.is_azel:
             lonlat = next_state_df[['az', 'el']].values
@@ -483,7 +553,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         return params.dead_time(distances / units.deg, filter_change) - params.visit_overhead(filter_change)
 
     def _field_center_radec(self, rows) -> tuple[np.ndarray, np.ndarray]:
-        """Lookup field-center RA/Dec per row (as the environment uses); zenith rows keep their own RA/Dec.
+        """Lookup field-center (and zenith) RA/Dec per row.
 
         Parameters
         ----------
@@ -498,8 +568,16 @@ class TransitionDataset(torch.utils.data.Dataset):
         field_ids = rows['field_id'].to_numpy()
         is_zenith = field_ids == ZENITH_FIELD_ID
         safe_ids = np.where(is_zenith, 0, field_ids).astype(int)
-        ra = np.where(is_zenith, rows['ra'].to_numpy(), self.lookups.fields['ra'].to_numpy()[safe_ids])
-        dec = np.where(is_zenith, rows['dec'].to_numpy(), self.lookups.fields['dec'].to_numpy()[safe_ids])
+        zen_ra, zen_dec = rows['ra'].to_numpy(dtype=float), rows['dec'].to_numpy(dtype=float)
+        if self.field_level and is_zenith.any():
+            # Field runs slew from the zenith computed as the environment does (float64 at the row's time).
+            ts = rows['timestamp'].to_numpy()
+            for i in np.where(is_zenith)[0]:
+                zen_ra[i], zen_dec[i] = ephemerides.blanco_observer(time=float(ts[i])).radec_of('0', '90')
+        ra = np.where(is_zenith, zen_ra if self.field_level else rows['ra'].to_numpy(),
+                      self.lookups.fields['ra'].to_numpy()[safe_ids])
+        dec = np.where(is_zenith, zen_dec if self.field_level else rows['dec'].to_numpy(),
+                       self.lookups.fields['dec'].to_numpy()[safe_ids])
         return ra, dec
 
 
@@ -558,7 +636,39 @@ class TransitionDataset(torch.utils.data.Dataset):
     #         0.0,
     #     )
 
+    def _field_action_masks(self, state_idxs) -> np.ndarray:
+        """Field-level masks per state: visible (airmass, telescope mount envelope) and incomplete fields in plan.
+
+        Parameters
+        ----------
+        state_idxs : np.ndarray
+            Row indices of the states.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean (n_states, n_fields * n_filters).
+        """
+        cache = self._field_cache
+        names = cache.field_feature_names
+        el_col, ha_col = names.index('el'), names.index('ha')
+        comp_cols = [names.index(f"completion_{f}") for f in FILTER2IDX]
+        dec = self.lookups.fields['dec'].to_numpy()
+        rows = np.asarray(state_idxs)
+        masks = np.empty((len(rows), self.nbins * self.num_filters), dtype=np.bool_)
+        for start in range(0, len(rows), _BIN_GATHER_CHUNK):
+            chunk = cache.field_features[rows[start:start + _BIN_GATHER_CHUNK]]
+            visible = self._telescope.visible(chunk[..., el_col], chunk[..., ha_col], dec, self._airmass_limit)
+            completion = chunk[..., comp_cols]
+            incomplete = completion < 1.0          # NaN (out of plan) compares False
+            masks[start:start + len(chunk)] = (incomplete & visible[..., None]).reshape(len(chunk), -1)
+        return masks
+
     def _construct_action_masks(self, state_df, action_space, num_states, state_idxs):
+        if self.field_level:
+            if not self._calculate_action_mask:
+                return np.ones((num_states, self.num_actions), dtype=np.bool_)
+            return self._field_action_masks(state_idxs)
         state_df = state_df.iloc[state_idxs]
         els = np.empty((num_states, self.nbins), dtype=np.float32)
 
@@ -656,6 +766,9 @@ class TransitionDataset(torch.utils.data.Dataset):
         bin_normalizer = StateNormalizer(
             state_feature_names=self.bin_feature_names, **norm_kwargs
         )
+        if self.field_level:
+            bin_normalizer = build_field_normalizer(self.bin_feature_names)
+            field_stats = field_norm_stats(self.bin_feature_names)
 
         if fit:
             self.states, glob_z, glob_rel, self.global_sentinel_mask = \
@@ -668,7 +781,11 @@ class TransitionDataset(torch.utils.data.Dataset):
             )
 
         bin_z, bin_rel = None, None
-        if self.include_bin_features and self._prenorm_bin_states is not None:
+        if self.field_level:
+            self._prenorm_bin_states, self.bin_sentinel_mask = bin_normalizer.transform(
+                state=torch.as_tensor(self._prenorm_bin_states), z_stats_dict=field_stats, rel_stats_dict={}
+            )
+        elif self.include_bin_features and self._prenorm_bin_states is not None:
             bin_tensor = torch.as_tensor(self._prenorm_bin_states)
             if fit:
                 self._prenorm_bin_states, bin_z, bin_rel, self.bin_sentinel_mask = \
@@ -693,6 +810,8 @@ class TransitionDataset(torch.utils.data.Dataset):
             rel_norm={'global_features': glob_rel, 'bin_features': bin_rel},
             reward=self._reward_stats,
         )
+        if self.field_level and fit:
+            self.norm_stats.z_score['field_features'] = field_stats
 
     # ------------------------------------------------------------------
     # Tensor formatting & validation
@@ -731,7 +850,8 @@ class TransitionDataset(torch.utils.data.Dataset):
         }
         self.dataset_feature_names = {
             'global_features': self.global_feature_names,
-            'bin_features': self.bin_feature_names,
+            'bin_features': [] if self.field_level else self.bin_feature_names,
+            'field_features': self.bin_feature_names if self.field_level else [],
         }
 
     def _validate_dataset(self):

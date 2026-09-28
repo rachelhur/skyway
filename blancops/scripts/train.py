@@ -9,7 +9,7 @@ from blancops.rl.trainer import Trainer
 from blancops.utils.sys_utils import get_system_device, seed_everything
 from blancops.io.logger_utils import configure_logger
 from blancops.data.dataset import TransitionDataset, OfflineDataset
-from blancops.data.feature_cache import RawFeatureCache, DatasetCache
+from blancops.data.feature_cache import FieldFeatureCache, RawFeatureCache, DatasetCache
 from blancops.data.splits import resolve_night_split
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.plotting.training_viz import (
@@ -18,7 +18,7 @@ from blancops.plotting.training_viz import (
 )
 from blancops.rl.registry import build_algorithm
 from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate, resolve_and_save
-from blancops.configs.paths import RunPaths, feature_cache_dir, lookups_dir, workspace
+from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, workspace
 from blancops.configs.enums import Algorithm, CheckpointMetric
 
 import argparse
@@ -28,6 +28,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from pathlib import Path
+from blancops.configs.enums import grid_is_azel, is_field_level
 
 
 def get_args():
@@ -83,17 +84,19 @@ def main():
 
     # --- LOAD FEATURE CACHE --- #
     data_dir = Path(args.data_dir)
-    is_azel = 'azel' in cfg.data.action_space
-    cache_dir = feature_cache_dir(data_dir, cfg.data.nside, is_azel)
+    is_azel = grid_is_azel(cfg.data.action_space)
+    field_level = is_field_level(cfg.data.action_space)
+    cache_cls = FieldFeatureCache if field_level else RawFeatureCache
+    cache_dir = field_feature_cache_dir(data_dir) if field_level else feature_cache_dir(data_dir, cfg.data.nside, is_azel)
 
-    if not RawFeatureCache.exists(cache_dir):
+    if not cache_cls.exists(cache_dir):
         raise FileNotFoundError(
             f"Feature cache not found at {cache_dir}. "
             f"Run `precompute-features --outdir {cache_dir} ...` first."
         )
     if args.dry_run_split:
         night_split = resolve_night_split(
-            unique_nights=RawFeatureCache.nights_in_range(
+            unique_nights=cache_cls.nights_in_range(
                 cache_dir,
                 start_date=cfg.data.start_date,
                 end_date=cfg.data.end_date,
@@ -109,11 +112,14 @@ def main():
         return
 
     logger.info(f"Loading feature cache from {cache_dir}")
-    cache = RawFeatureCache.load(
-        cache_dir, mmap_bin=True,
-        start_date=cfg.data.start_date,
-        end_date=cfg.data.end_date,
-    )
+    if field_level:
+        cache = FieldFeatureCache.load(cache_dir, mmap=True, start_date=cfg.data.start_date, end_date=cfg.data.end_date)
+    else:
+        cache = RawFeatureCache.load(
+            cache_dir, mmap_bin=True,
+            start_date=cfg.data.start_date,
+            end_date=cfg.data.end_date,
+        )
     train_lookups = TrainLookupTables.load_from_dir(lookups_dir(data_dir))
 
     # --- CONSTRUCT TRAIN DATASET --- #
@@ -160,7 +166,8 @@ def main():
     logger.info("Released feature cache from memory.")
 
     # --- DEFAULT PLOTS --- #
-    plot_bin_membership(train_dataset, run_paths.figures)
+    if not field_level:
+        plot_bin_membership(train_dataset, run_paths.figures)
     plot_global_feature_distributions(train_dataset, run_paths.figures)
     plot_bin_feature_distributions(train_dataset, run_paths.figures)
 

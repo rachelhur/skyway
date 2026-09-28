@@ -13,6 +13,7 @@ from blancops.configs.constants import *
 import logging
 
 from blancops.plotting.plotting import plot_bins_movie, plot_schedule_whole
+from blancops.configs.enums import grid_is_azel
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class OfflineRunner:
             times=df[SCHEDULE_KEYS['timestamp']].values,
             idxs=df[SCHEDULE_KEYS['bin_id']].values,
             field_pos=self._field_pos_from_df(df),
-            is_azel='azel' in self.cfg.data.action_space,
+            is_azel=grid_is_azel(self.cfg.data.action_space),
         )
 
     def _save_mollweide(self, df, ep_num):
@@ -226,7 +227,7 @@ class OfflineRunner:
         self.policy.eval()
         episode_rewards = []
 
-        hpGrid = ephemerides.HealpixGrid(nside=self.cfg.data.nside, is_azel=('azel' in self.cfg.data.action_space))
+        hpGrid = ephemerides.HealpixGrid(nside=self.cfg.data.nside, is_azel=grid_is_azel(self.cfg.data.action_space))
 
         for ep_num in tqdm(range(self.num_episodes)):
             obs, info = env.reset()
@@ -244,6 +245,7 @@ class OfflineRunner:
 
             episode_manifest = {}  # night_key -> csv path
             episode_dispersion = {}  # night_key -> per-filter (D_b, baseline_b) at the night's last in-night step
+            episode_steps = {}  # night_key -> per-exposure dead time and predicted teff (NaN when not computed)
             night_dispersion = env.unwrapped._survey_progress_tracker.dispersion_index()
             reward = 0
             night_idx = 0
@@ -286,11 +288,9 @@ class OfflineRunner:
                     pre_step_bin  = obs['bin_state']
                     pre_step_bin_nan_mask  = info.get('bin_nan_mask')
 
-                    obs, reward, terminated, truncated, info = env.step({
-                        'bin': np.int32(bin_idx),
-                        'field_id': np.int32(field_id),
-                        'filter_idx': np.int32(filter_idx),
-                    })
+                    obs, reward, terminated, truncated, info = env.step(
+                        self.agent.command_to_env_action(bin_idx, filter_idx, field_id)
+                    )
 
                     is_first_wait = (bin_idx == WAIT_SIGNAL) and (last_bin_idx != WAIT_SIGNAL)
                     is_real_obs = bin_idx >= 0
@@ -313,6 +313,11 @@ class OfflineRunner:
                             np.asarray(action_mask, dtype=bool)
                         )
 
+                    if is_real_obs and env.unwrapped._step_record is not None:
+                        rec = env.unwrapped._step_record
+                        episode_steps.setdefault(current_night_key, []).append(
+                            {'dead_time': float(rec['dead_time']), 'teff_pred': float(rec.get('teff_pred', np.nan))}
+                        )
                     running_reward += reward
                     last_bin_idx = bin_idx
 
@@ -369,16 +374,19 @@ class OfflineRunner:
             episode_rewards.append(running_reward)
             pbar.close()
 
-        rollout_info = self._construct_diagnostics(episode_rewards, episode_manifest, ep_num, episode_dispersion)
+        rollout_info = self._construct_diagnostics(episode_rewards, episode_manifest, ep_num, episode_dispersion,
+                                                   episode_steps)
         self._write_diagnostics_to_file(rollout_info)
         return rollout_info
 
-    def _construct_diagnostics(self, episode_rewards, episode_manifest, ep_num, episode_dispersion=None):
+    def _construct_diagnostics(self, episode_rewards, episode_manifest, ep_num, episode_dispersion=None,
+                               episode_steps=None):
         diagnostics = {
             f'ep-{ep_num}': {
                 'manifest': dict(episode_manifest),
                 'total_reward': float(episode_rewards[ep_num]) if episode_rewards else 0.0,
                 'dispersion': dict(episode_dispersion or {}),
+                'steps': dict(episode_steps or {}),
             },
             'mean_reward': float(np.mean(episode_rewards)) if episode_rewards else 0.0,
             'std_reward':  float(np.std(episode_rewards))  if episode_rewards else 0.0,

@@ -8,6 +8,7 @@ from blancops.ephemerides import ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
 
 import logging
+from blancops.configs.enums import has_filter, is_field_level
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +59,7 @@ class Agent:
         self.action_decode = action_decode
 
     def _choose_bin_and_filter(self, x_glob, x_bin, action_mask, info, epsilon=None):
-        do_filt = 'filter' in self.cfg.data.action_space
+        do_filt = has_filter(self.cfg.data.action_space)
         visible_bin_mask = info.get('visible_bin_mask') if info is not None else None
 
         if self.action_decode == 'filter_first' and do_filt and action_mask is not None and visible_bin_mask is not None:
@@ -105,14 +106,61 @@ class Agent:
         logger.debug(f'Chosen bin contains {len(field_ids_in_bin)} incomplete fields out of {len(valid_fields_in_bin)} fields total')
         return field_ids_in_bin
 
+    def command_to_env_action(self, bin_idx: int, filter_idx: int, field_id: int) -> dict:
+        """Environment action for a decoded choice: a physical command for field_filter, else the bin action.
+
+        Parameters
+        ----------
+        bin_idx : int
+            Grid bin (bookkeeping on field_filter), or WAIT_SIGNAL.
+        filter_idx : int
+            Filter index.
+        field_id : int
+            Field id.
+
+        Returns
+        -------
+        dict
+            {'pointing', 'filter', 'wait'} for field_filter; {'bin', 'field_id', 'filter_idx'} otherwise.
+        """
+        if not is_field_level(self.cfg.data.action_space):
+            return {'bin': np.int32(bin_idx), 'field_id': np.int32(field_id), 'filter_idx': np.int32(filter_idx)}
+        if bin_idx == WAIT_SIGNAL:
+            return {'pointing': np.zeros(2), 'filter': 0, 'wait': 1}
+        fields = self.lookups.fields
+        return {'pointing': np.array([fields['ra'].to_numpy()[field_id], fields['dec'].to_numpy()[field_id]]),
+                'filter': int(filter_idx), 'wait': 0}
+
+    def _choose_field_filter(self, glob_tensor, cand_tensor, action_mask, info, hpGrid):
+        """Field-level decode: masked argmax over (field, filter); wait when nothing is allowed.
+
+        Returns
+        -------
+        tuple
+            (grid bin of the field for bookkeeping or WAIT_SIGNAL, filter_idx, field_id).
+        """
+        if action_mask is not None and not bool(action_mask.any()):
+            return WAIT_SIGNAL, 0, -1
+        with torch.no_grad():
+            action = int(self.policy.select_action(x_glob=glob_tensor, x_bin=cand_tensor, action_mask=action_mask))
+        field_id, filter_idx = divmod(action, self.policy.num_filters)
+        ra, dec = self.lookups.fields['ra'].to_numpy()[field_id], self.lookups.fields['dec'].to_numpy()[field_id]
+        if hpGrid.is_azel:
+            ra, dec = ephemerides.equatorial_to_topographic(ra=ra, dec=dec, time=info.get('timestamp'))
+        grid_bin = hpGrid.ang2idx(lon=ra, lat=dec)
+        return (grid_bin if grid_bin is not None else 0), filter_idx, field_id
+
     def choose_bin_filter_field(self, obs, info, hpGrid, epsilon=None):
         """
-        Choose field in bin based on interpolated Q-values
+        Choose field in bin based on interpolated Q-values; field_filter chooses the field directly.
         """
         # Unpack obs
         glob_tensor = torch.as_tensor(obs['global_state'], device=self.device, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
         bin_tensor = torch.as_tensor(obs['bin_state'], device=self.device, dtype=torch.float32).unsqueeze(0)     # Add batch dimension
         action_tensor_mask = torch.as_tensor(info.get('action_mask', None), device=self.device, dtype=torch.bool) if info.get('action_mask', None) is not None else None
+
+        if is_field_level(self.cfg.data.action_space):
+            return self._choose_field_filter(glob_tensor, bin_tensor, action_tensor_mask, info, hpGrid)
 
         # Choose action in action space
         bin_idx, filter_idx = self._choose_bin_and_filter(glob_tensor, bin_tensor, action_tensor_mask, info, epsilon)
