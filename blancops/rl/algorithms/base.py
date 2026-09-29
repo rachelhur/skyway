@@ -10,7 +10,8 @@ def q_value_metrics(q_all: torch.Tensor, q_taken: torch.Tensor, q_target: torch.
                     action_masks: torch.Tensor) -> dict:
     """Q-scale diagnostics over valid actions, shared by the value-based algorithms.
 
-    rel_td_error = mean|Q(s,a) - y| / mean|Q(s,a)|; q_gap = mean_s max_{valid a} Q(s,a) - mean Q(s,a_data).
+    rel_td_error = mean|Q(s,a) - y| / mean|Q(s,a)|; td_residual = mean(y - Q(s,a));
+    q_gap = mean_s max_{valid a} Q(s,a) - mean Q(s,a_data).
 
     Parameters
     ----------
@@ -26,7 +27,7 @@ def q_value_metrics(q_all: torch.Tensor, q_taken: torch.Tensor, q_target: torch.
     Returns
     -------
     dict
-        rel_td_error, q_policy, q_gap, q_max, q_min, q_target_mean as floats.
+        rel_td_error, td_residual, q_policy, q_gap, q_max, q_min, q_target_mean as floats.
     """
     q_all, q_taken, q_target = q_all.float(), q_taken.float(), q_target.float()                # reduce in fp32 under autocast
     q_valid_max = q_all.masked_fill(~action_masks, torch.finfo(q_all.dtype).min).max(dim=1)[0]  # [batch]
@@ -35,6 +36,7 @@ def q_value_metrics(q_all: torch.Tensor, q_taken: torch.Tensor, q_target: torch.
     q_policy = q_valid_max.mean()
     return {
         "rel_td_error":  (td_error / q_taken.abs().mean().clamp_min(1e-8)).item(),
+        "td_residual":   (q_target - q_taken).mean().item(),
         "q_policy":      q_policy.item(),
         "q_gap":         (q_policy - q_taken.mean()).item(),
         "q_max":         q_valid.max().item(),
