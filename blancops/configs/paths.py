@@ -204,6 +204,8 @@ class RunPaths:
     LATEST_CHECKPOINT = "latest_checkpoint.pt"
     CHECKPOINT_HISTORY = "checkpoint_history.json"
     PERIODIC_CHECKPOINT = "epoch_{epoch:03d}.pt"
+    PERIODIC_CHECKPOINT_GLOB = "epoch_*.pt"
+    BEST_CHECKPOINT_GLOB = "checkpoint_epoch_*_metric_*.pt"
 
     def __post_init__(self):
         object.__setattr__(self, "root", Path(self.root))

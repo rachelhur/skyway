@@ -54,6 +54,24 @@ class Checkpointer:
             except json.JSONDecodeError:
                 logger.warning("Could not read checkpoint history. Starting fresh.")
 
+    def _soft_reset(self):
+        """Start a fresh top-k history; existing checkpoint files stay on disk."""
+        self.best_checkpoints = []
+        self._save_history()
+
+    def _hard_reset(self):
+        """Delete every file this Checkpointer writes (top-k, periodic, latest, deployment model, history).
+
+        Other files in the directory, such as the split dataset caches, are left alone.
+        """
+        owned = [*self.outdir.glob(RunPaths.BEST_CHECKPOINT_GLOB), *self.outdir.glob(RunPaths.PERIODIC_CHECKPOINT_GLOB),
+                 self.outdir / RunPaths.LATEST_CHECKPOINT, self.outdir / RunPaths.MODEL_PT, self._history_file]
+        removed = [p for p in owned if p.exists()]
+        for p in removed:
+            p.unlink()
+        logger.info(f"Hard overwrite: removed {len(removed)} checkpoint files from {self.outdir}")
+        self.best_checkpoints = []
+
     def _save_history(self):
         with open(self._history_file, 'w') as f:
             json.dump(self.best_checkpoints, f)
