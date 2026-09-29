@@ -210,6 +210,7 @@ def main():
         overwrite=args.overwrite,
         hard_overwrite=args.hard_overwrite,
         ckpt_metric=cfg.train.checkpoint_metric,
+        save_every_n_epochs=cfg.train.save_every_n_epochs,
     )
 
     if latest_ckpt_path.exists() and args.resume_from_checkpoint:

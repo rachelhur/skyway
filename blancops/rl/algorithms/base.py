@@ -6,6 +6,43 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def q_value_metrics(q_all: torch.Tensor, q_taken: torch.Tensor, q_target: torch.Tensor,
+                    action_masks: torch.Tensor) -> dict:
+    """Q-scale diagnostics over valid actions, shared by the value-based algorithms.
+
+    rel_td_error = mean|Q(s,a) - y| / mean|Q(s,a)|; q_gap = mean_s max_{valid a} Q(s,a) - mean Q(s,a_data).
+
+    Parameters
+    ----------
+    q_all : torch.Tensor
+        Q-values for every action, shape (batch, n_actions).
+    q_taken : torch.Tensor
+        Q of the dataset action, shape (batch,).
+    q_target : torch.Tensor
+        Bellman target y for the dataset action, shape (batch,).
+    action_masks : torch.Tensor
+        Valid-action mask, bool, shape (batch, n_actions).
+
+    Returns
+    -------
+    dict
+        rel_td_error, q_policy, q_gap, q_max, q_min, q_target_mean as floats.
+    """
+    q_all, q_taken, q_target = q_all.float(), q_taken.float(), q_target.float()                # reduce in fp32 under autocast
+    q_valid_max = q_all.masked_fill(~action_masks, torch.finfo(q_all.dtype).min).max(dim=1)[0]  # [batch]
+    q_valid = q_all[action_masks]                                                             # [n_valid]
+    td_error = (q_taken - q_target).abs().mean()
+    q_policy = q_valid_max.mean()
+    return {
+        "rel_td_error":  (td_error / q_taken.abs().mean().clamp_min(1e-8)).item(),
+        "q_policy":      q_policy.item(),
+        "q_gap":         (q_policy - q_taken.mean()).item(),
+        "q_max":         q_valid.max().item(),
+        "q_min":         q_valid.min().item(),
+        "q_target_mean": q_target.mean().item(),
+    }
+
+
 class AlgorithmBase(ABC):
     """Owns the optimizer/scheduler lifecycle and the train/val step template.
 

@@ -145,6 +145,29 @@ class Checkpointer:
         assert 0 < len(self.best_checkpoints) <= self.top_k
 
 
+    def save_periodic(self, algorithm, path: Path, epoch: int, val_metrics: dict, norm_stats: dict = None) -> None:
+        """Save weights for one epoch regardless of the checkpoint metric, so the epoch can be re-picked later.
+
+        Parameters
+        ----------
+        algorithm : AlgorithmBase
+            Algorithm whose policy weights are saved.
+        path : Path
+            Output file (RunPaths.periodic_checkpoint).
+        epoch : int
+            Training epoch.
+        val_metrics : dict
+            Validation metrics of this epoch, metric name -> float.
+        norm_stats : dict, optional
+            Normalization stats needed to run the policy.
+        """
+        torch.save({
+            'policy_state_dict': algorithm.policy.state_dict(),
+            'epoch': epoch,
+            'val_metrics': val_metrics,
+            'norm_stats': norm_stats,
+        }, path)
+
     def export_deployment_model(self, policy, norm_stats: dict, filename=RunPaths.MODEL_PT):
         """Saves a stripped-down, prefix-free state dict for deployment."""
         raw_state_dict = policy.state_dict()

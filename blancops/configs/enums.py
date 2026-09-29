@@ -25,6 +25,15 @@ class CheckpointMetric(str, Enum):
     VAL_LOSS = "val_loss"
     ANGULAR_SEPARATION = "ang_sep"
     MAX_Q_POLICY = "q_policy"
+    ACCURACY = "accuracy"
+
+class LossFunction(str, Enum):
+    CROSS_ENTROPY = "cross_entropy"
+    FOCAL_LOSS = "focal_loss"
+    FOCAL_LOSS_FILTER = "focal_loss_filter"
+    FOCAL_LOSS_SLEW = "focal_loss_slew"
+    HUBER = "huber"
+    MSE = "mse"
 
 _AUTOREGRESSIVE_NETWORKS = {Network.AUTOREGRESSIVE}
 

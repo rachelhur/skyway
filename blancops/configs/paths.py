@@ -203,6 +203,7 @@ class RunPaths:
     MODEL_PT = "model.pt"
     LATEST_CHECKPOINT = "latest_checkpoint.pt"
     CHECKPOINT_HISTORY = "checkpoint_history.json"
+    PERIODIC_CHECKPOINT = "epoch_{epoch:03d}.pt"
 
     def __post_init__(self):
         object.__setattr__(self, "root", Path(self.root))
@@ -235,6 +236,21 @@ class RunPaths:
     @property
     def checkpoints(self) -> Path:
         return self.root / "checkpoints"
+
+    def periodic_checkpoint(self, epoch: int) -> Path:
+        """Weights saved on the every-N-epochs schedule, independent of the checkpoint metric.
+
+        Parameters
+        ----------
+        epoch : int
+            Training epoch (1-based).
+
+        Returns
+        -------
+        Path
+            checkpoints/epoch_<epoch>.pt
+        """
+        return self.checkpoints / self.PERIODIC_CHECKPOINT.format(epoch=epoch)
 
     @property
     def metrics(self) -> Path:

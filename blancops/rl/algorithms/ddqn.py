@@ -3,7 +3,7 @@ import torch
 
 from blancops.configs.enums import Algorithm
 from blancops.ephemerides.ephemerides import HealpixGrid
-from blancops.rl.algorithms.base import AlgorithmBase
+from blancops.rl.algorithms.base import AlgorithmBase, q_value_metrics
 
 import logging
 logger = logging.getLogger(__name__)
@@ -148,9 +148,9 @@ class DDQN(AlgorithmBase):
             "td_error": (q_val - q_expected).abs().mean().item(),
             "td_loss":  self._td_loss(q_val, q_expected).item(),
             "q_std":    q_vals_all.std().item(),
-            "q_policy": q_vals_all.max(dim=1)[0].mean().item(),
             "q_expert": q_val.mean().item(),
             "accuracy": (predicted_actions == expert_squeezed).float().mean().item(),
+            **q_value_metrics(q_vals_all, q_val, q_expected, action_masks),
         }
 
         if candidate_grid is not None:

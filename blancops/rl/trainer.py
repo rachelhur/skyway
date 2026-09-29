@@ -29,6 +29,7 @@ _CKPT_DIRECTION: dict[CheckpointMetric, str] = {
     CheckpointMetric.VAL_LOSS:           'min',
     CheckpointMetric.ANGULAR_SEPARATION: 'min',
     CheckpointMetric.MAX_Q_POLICY:       'max',
+    CheckpointMetric.ACCURACY:           'max',
 }
 _CKPT_INIT_BEST: dict[str, float] = {
     'min': float('inf'),
@@ -43,7 +44,8 @@ _CKPT_OP = {
 _CKPT_GATE: dict[CheckpointMetric, tuple | None] = {
     CheckpointMetric.VAL_LOSS:           None,
     CheckpointMetric.ANGULAR_SEPARATION: None,
-    CheckpointMetric.MAX_Q_POLICY:       ('td_error', operator.lt, 0.50),
+    CheckpointMetric.MAX_Q_POLICY:       ('rel_td_error', operator.lt, 0.15),
+    CheckpointMetric.ACCURACY:           None,
 }
 
 
@@ -61,6 +63,7 @@ class Trainer:
             overwrite: bool = False,
             hard_overwrite: bool = False,
             ckpt_metric: CheckpointMetric = CheckpointMetric.VAL_LOSS,
+            save_every_n_epochs: int = 3,
             ):
         self.algorithm = algorithm
         self.device = algorithm.device
@@ -71,6 +74,7 @@ class Trainer:
         self.overwrite = overwrite
         self.hard_overwrite = hard_overwrite
         self.ckpt_metric = ckpt_metric
+        self.save_every_n_epochs = save_every_n_epochs
         self.checkpointer = Checkpointer(
             self.run_paths.checkpoints,
             top_k=top_k,
@@ -188,6 +192,15 @@ class Trainer:
                             f" (val set)      {val_log_str} \n"
                             f" (train batch)  {train_log_str}"
                         )
+
+                        if self.save_every_n_epochs and i_epoch % self.save_every_n_epochs == 0:
+                            self.checkpointer.save_periodic(
+                                algorithm=self.algorithm,
+                                path=self.run_paths.periodic_checkpoint(i_epoch),
+                                epoch=i_epoch,
+                                val_metrics={k: v[-1] for k, v in val_metrics.items()},
+                                norm_stats=norm_stats,
+                            )
 
                         # Early stopping and model saving
                         ckpt_vals = val_metrics.get(metric_key)

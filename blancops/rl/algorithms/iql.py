@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from blancops.configs.enums import Algorithm
-from blancops.rl.algorithms.base import AlgorithmBase
+from blancops.rl.algorithms.base import AlgorithmBase, q_value_metrics
 
 import logging
 logger = logging.getLogger(__name__)
@@ -256,12 +256,12 @@ class IQL(AlgorithmBase):
             "pi_loss":  pi_loss.item(),
             "td_error": (q_pred_taken - q_expected).abs().mean().item(),
             "q_expert": q_pred_taken.mean().item(),
-            "q_policy": q_all.max(dim=1)[0].mean().item(),
             "q_std":    q_all.std().item(),
             "v_mean":   v_pred.mean().item(),
             "adv_mean": advantages.mean().item(),
             "adv_std":  advantages.std().item(),
             "accuracy": (predicted_actions == expert_squeezed).float().mean().item(),
+            **q_value_metrics(q_all, q_pred_taken, q_expected, action_masks),
         }
 
         if candidate_grid is not None:

@@ -63,7 +63,7 @@ model:
     norm: minmax                    # minmax | null; stats are fit on the training split
 
 train:
-  checkpoint_metric: q_policy       # q_policy | ang_sep | val_loss
+  checkpoint_metric: q_policy       # q_policy | accuracy | ang_sep | val_loss
   max_epochs: 50
   batch_size: 1024
   lr_init: 1.0e-3
@@ -72,6 +72,7 @@ train:
   lr_sched_epoch_start: 10
   lr_sched_epoch_duration: 30       # lr_sched_epoch_start + lr_sched_epoch_duration <= max_epochs
   patience: 10
+  save_every_n_epochs: 3            # keep weights every N epochs in addition to the top-k; 0 disables
   num_workers: 0
   device: cuda
   seed: 42

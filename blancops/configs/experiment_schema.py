@@ -248,7 +248,7 @@ class BaseAlgConfig(BaseModel):
     loss_strategy: ActionArchitecture = ActionArchitecture.PURE_JOINT
     hidden_dim: int = 128
     nlayers: int = 4
-    loss_function: str
+    loss_function: LossFunction
     contextual_gating: bool = False
     activation: str = "relu"
     global_enc_dim: Optional[int] = 128
@@ -319,6 +319,8 @@ class RewardConfig(BaseModel):
 
 class BCAlgConfig(BaseAlgConfig):
     algorithm: Literal[Algorithm.BC]
+    loss_function: Literal[LossFunction.CROSS_ENTROPY, LossFunction.FOCAL_LOSS,
+                           LossFunction.FOCAL_LOSS_FILTER, LossFunction.FOCAL_LOSS_SLEW]
 
     # Loss function knobs (used by some strategies, ignored by others)
     reduction: str = "mean"
@@ -359,6 +361,7 @@ class BCAlgConfig(BaseAlgConfig):
         return v
 
 class RLAlgConfig(BaseAlgConfig):
+    loss_function: Literal[LossFunction.HUBER, LossFunction.MSE]
     reward: RewardConfig = Field(default_factory=RewardConfig)
     gamma: float = 0.99
     tau: float = 0.005
@@ -441,6 +444,7 @@ class TrainConfig(BaseModel):
     lr_sched_epoch_start: int = 10
     lr_sched_epoch_duration: int = 30
     patience: int = 20
+    save_every_n_epochs: int = 3     # keep weights every N epochs in addition to the top-k; 0 disables
     device:         str   = "cuda"
     seed:           int   = 42
 
@@ -473,7 +477,7 @@ class TrainConfig(BaseModel):
             raise ValueError('learning rate should be <= 1.0')
         return v
 
-    @field_validator('lr_sched_epoch_start', 'lr_sched_epoch_duration')
+    @field_validator('lr_sched_epoch_start', 'lr_sched_epoch_duration', 'save_every_n_epochs')
     @classmethod
     def validate_non_negative(cls, v):
         if v < 0:
