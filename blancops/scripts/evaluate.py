@@ -7,6 +7,7 @@ from pathlib import Path
 from matplotlib import pyplot as plt
 from blancops.io.logger_utils import configure_logger
 from blancops.rl.evaluations.evaluator import build_evaluators, plot_metric_distributions_with_ss_overlay
+from blancops.rl.evaluations import survey_metrics as sm
 from blancops.configs.experiment_schema import load_and_validate
 from blancops.configs.paths import RunPaths
 import logging
@@ -31,6 +32,8 @@ def main():
                         help='Also draw HEALPix bins in movies of field-level models (bin-level models always draw them).')
     parser.add_argument('--split', type=str, default='test', choices=['val', 'test'],
                         help='Which split to evaluate.')
+    parser.add_argument('--baselines', action='store_true',
+                        help='Also run the random and min_slew heuristics in the depth-vs-uniformity figure.')
 
     args = parser.parse_args()
 
@@ -44,10 +47,8 @@ def main():
     device = get_system_device()
 
     # Resolve the model dir from where the config was loaded (machine-portable).
-    suffix = '_filter_first' if args.action_decoding == 'filter_first' else ''
-    base_eval_dir = RunPaths.from_config(cfg).eval_dir(args.split)
-    eval_subdir = f'{base_eval_dir.name}{suffix}'
-    outdir = base_eval_dir.with_name(eval_subdir)
+    outdir = RunPaths.from_config(cfg).eval_dir(args.split, args.action_decoding)
+    eval_subdir = outdir.name
 
     # ------------------------------
     # Initialize logger
@@ -119,7 +120,17 @@ def main():
     plt.savefig(outdir / 'ss' / 'cdf_pointing_error.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-
-
-
-
+    # ------------------------------
+    # Degradation and depth against DES
+    # ------------------------------
+    rollout = sm.policy_rollout(m_eval)
+    if rollout is None:
+        logger.warning("No manifest-listed night CSVs; skipping degradation and depth figures.")
+        return
+    algorithm = cfg.model.algorithm.name
+    record = sm.load_des_record(sm.resolve_fits_path(cfg), sm.evaluated_nights(m_eval))
+    scored, report = sm.score_schedulers({algorithm: rollout}, record, m_eval.data.lookups,
+                                         heuristics=args.baselines)
+    report.log()
+    sm.save_closed_loop_degradation(scored, algorithm, algorithm, outdir / 'ms')
+    sm.save_depth_uniformity(scored, report, m_eval.data.lookups, {algorithm: algorithm}, outdir / 'ms')

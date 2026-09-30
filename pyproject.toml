@@ -15,9 +15,11 @@ include = ["blancops*"]
 workspace-init = "blancops.scripts.init:main"
 build-train-lookups = "blancops.scripts.build_train_lookups:main"
 run-train = "blancops.scripts.train:main"
-run-validate = "blancops.scripts.validate:main"
+run-evaluate = "blancops.scripts.evaluate:main"
+run-compare = "blancops.scripts.compare_models:main"
 run-offline-scheduler = "blancops.scripts.run_offline_scheduler:main"
 run-live-scheduler = "blancops.scripts.run_live_scheduler:main"
+run-explain = "blancops.scripts.run_explain:main"
 precompute-train-features = "blancops.scripts.precompute_features:main"
 
 [tool.setuptools.package-data]
