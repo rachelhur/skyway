@@ -94,7 +94,7 @@ def build_evaluators(
         if isinstance(cfg_or_cfg_path, str)
         else cfg_or_cfg_path
     )
-    style = style or PlotStyle()
+    style = style or PlotStyle(agent_label=f"{cfg.model.algorithm.name} Agent")
 
     # Resolve the model dir from where the config was loaded
     run_paths = RunPaths.from_config(cfg)
@@ -444,7 +444,7 @@ class Evaluator(ABC):
 
     def plot_violin_per_filter(self, key_metric='moon_el'):
         expert_df = self.data.expert_df.assign(source='Expert')
-        agent_df  = self.data.agent_df.assign(source='BC Agent')
+        agent_df  = self.data.agent_df.assign(source=self.plotter.style.agent_label)
 
         combined_df = pd.concat(
             [expert_df[[key_metric, 'filter', 'source']],
@@ -467,7 +467,7 @@ class Evaluator(ABC):
         agent_df['slew_dist'] = agent_df['slew_dist'].where(agent_df['slew_dist'] < 10, np.nan)
 
         expert_df = expert_df[metrics].assign(source='DES')
-        agent_df  = agent_df[metrics].assign(source='BC Agent')
+        agent_df  = agent_df[metrics].assign(source=self.plotter.style.agent_label)
 
         # 3. Combine into a single long-format DataFrame
         combined_df = pd.concat([expert_df, agent_df], ignore_index=True)

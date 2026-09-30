@@ -46,6 +46,7 @@ class PlotStyle:
     expert_cmap: str = 'Greens'
     res_cmap: str = 'PRGn_r'
     res_color: str = 'slateblue'
+    agent_label: str = 'Agent'
 
 
 def _wrapped_ra(ra):
@@ -518,7 +519,7 @@ class EvaluationPlotter:
             'sky_brightness_g': "Sky brightness (g')",
         }
 
-        # Split violin: Expert = left half, BC Agent = right half of each violin.
+        # Split violin: Expert = left half, agent = right half of each violin.
         # Requires seaborn >= 0.12.
         # If you see a DeprecationWarning on 'split', upgrade seaborn or swap to the
         # side-by-side fallback at the bottom of this file.
@@ -528,8 +529,8 @@ class EvaluationPlotter:
             y         = key_metric,
             hue       = 'source',
             order     = FILTER_ORDER,
-            hue_order = ['Expert', 'BC Agent'],
-            palette   = {'Expert': self.style.expert_color, 'BC Agent': self.style.agent_color},
+            hue_order = ['Expert', self.style.agent_label],
+            palette   = {'Expert': self.style.expert_color, self.style.agent_label: self.style.agent_color},
             split     = True,       # mirror both distributions within one violin body
             inner     = 'quartile', # show median + IQR as dashed lines inside violin
             linewidth = 0.7,
@@ -552,7 +553,7 @@ class EvaluationPlotter:
         ax.legend(
             handles=[
                 patches.Patch(color=self.style.expert_color, label='Expert'),
-                patches.Patch(color=self.style.agent_color,  label='BC Agent'),
+                patches.Patch(color=self.style.agent_color,  label=self.style.agent_label),
             ],
             fontsize=label_fontsize*(3/4), framealpha=0.9,
         )
@@ -563,7 +564,7 @@ class EvaluationPlotter:
     def _plot_metric_distributions(self, combined_df, metrics, label_fontsize=20):
         # One stacked panel per metric
         FIG_SIZE = (9, 2.93 * len(metrics))
-        COLORS = {'DES': self.style.expert_color, 'BC Agent': self.style.agent_color}
+        COLORS = {'DES': self.style.expert_color, self.style.agent_label: self.style.agent_color}
 
         fig, axes = plt.subplots(nrows=len(metrics), ncols=1, figsize=FIG_SIZE)
 
@@ -586,7 +587,7 @@ class EvaluationPlotter:
                 x           = metric,
                 hue         = 'source',
                 palette     = COLORS,
-                hue_order   = ['DES', 'BC Agent'],
+                hue_order   = ['DES', self.style.agent_label],
                 fill        = True,
                 alpha       = 0.25,
                 common_norm = False,
@@ -621,7 +622,7 @@ class EvaluationPlotter:
         axes[0].legend(
             handles=[
                 patches.Patch(color=self.style.expert_color, label='DES'),
-                patches.Patch(color=self.style.agent_color,  label='BC Agent'),
+                patches.Patch(color=self.style.agent_color,  label=self.style.agent_label),
             ],
             fontsize=label_fontsize,
             framealpha=0.9,
