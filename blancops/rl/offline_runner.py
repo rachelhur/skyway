@@ -39,7 +39,7 @@ class OfflineRunner:
         self._movie_bins = plot_bins or not self.field_level
         self._mollweide_bins = not self.field_level
         self.field_choice_method = self.agent.field_choice_method
-        self.outdir = Path(outdir)
+        self.outdir = Path(outdir) # XXX fix if None branch
         self.save_movie = save_movie
         self.save_mollweide = save_mollweide
         self.save_SISPI = save_SISPI
@@ -188,15 +188,38 @@ class OfflineRunner:
         """
         return df[SCHEDULE_KEYS['bin_id']].values if draw_bins else None
 
+    def _movie_path(self, ep_num, night_key):
+        return self._plots_dir / f'ep-{ep_num}_{night_key}_movie.gif'
+
     def _save_movie(self, df, ep_num, night_key):
         plot_schedule_movie(
-            outfile=str(self._plots_dir / f'ep-{ep_num}_{night_key}_movie.gif'),
+            outfile=str(self._movie_path(ep_num, night_key)),
             times=df[SCHEDULE_KEYS['timestamp']].values,
             field_pos=self._field_pos_from_df(df),
             bin_idxs=self._bin_idxs_from_df(df, self._movie_bins),
             nside=self.cfg.data.nside,
             is_azel=grid_is_azel(self.cfg.data.action_space),
         )
+
+    def save_missing_movies(self, manifest: dict, ep_num: int) -> None:
+        """Render a movie for each night CSV in the manifest that has no movie yet.
+
+        Parameters
+        ----------
+        manifest : dict
+            Night key -> path of that night's schedule CSV (None for an empty night).
+        ep_num : int
+            Episode number used in the movie file names.
+        """
+        self._plots_dir.mkdir(parents=True, exist_ok=True)
+        n_drawn, n_skipped = 0, 0
+        for night_key, csv_path in manifest.items():
+            if csv_path is None or self._movie_path(ep_num, night_key).exists():
+                n_skipped += 1
+                continue
+            self._save_movie(pd.read_csv(csv_path), ep_num, night_key)
+            n_drawn += 1
+        logger.info(f'Movies: drew {n_drawn}, skipped {n_skipped} (empty or already in {self._plots_dir})')
 
     def _save_mollweide(self, df, ep_num):
         plot_schedule_whole(
