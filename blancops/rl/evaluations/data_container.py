@@ -206,6 +206,31 @@ class DataContainer(ABC):
                 )
         return az_arr, el_arr, ra_arr, dec_arr
 
+def _field_center_radecs(self, df: pd.DataFrame, pointing_radecs: np.ndarray) -> np.ndarray:
+        """Lookup-table center of each row's observed field, in radians.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Expert rows, optionally carrying the hex `field` name.
+        pointing_radecs : np.ndarray
+            [n_rows, 2] dithered (ra, dec) pointing in radians; used where the
+            field is missing or not in the lookups.
+
+        Returns
+        -------
+        np.ndarray
+            [n_rows, 2] (ra, dec) in radians.
+        """
+        out = pointing_radecs.copy()
+        if 'field' not in df.columns:
+            return out
+        fields = self.lookups.fields
+        fid = df['field'].map(dict(zip(fields['field'], fields.index)))
+        ok = fid.notna().to_numpy()
+        out[ok] = fields.loc[fid[ok].astype(int), ['ra', 'dec']].to_numpy()
+        return out
+
     def _get_field_coords(self, field_ids, timestamps):
         ra_arr  = np.array([self.lookups.fields['ra'][f] for f in field_ids])
         dec_arr = np.array([self.lookups.fields['dec'][f] for f in field_ids])
@@ -314,7 +339,8 @@ class SingleStepDataContainer(DataContainer):
         self.expert_df['candidate_slew_dist'] = calc_slew_distance(prev_cand_radecs, cand_radecs)
         self.expert_df['slew_dist']     = calc_slew_distance(prev_radecs, radecs)
 
-        self._prev_radecs_rad     = prev_radecs.copy()
+        # Agent slews start at the previous field's center, not its dithered pointing
+        self._prev_radecs_rad     = self._field_center_radecs(self.prev_expert_df, prev_radecs)
         self._prev_cand_radecs_rad = prev_cand_radecs.copy()
 
         self.convert_to_deg(self.expert_df)
