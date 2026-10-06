@@ -206,7 +206,7 @@ class DataContainer(ABC):
                 )
         return az_arr, el_arr, ra_arr, dec_arr
 
-def _field_center_radecs(self, df: pd.DataFrame, pointing_radecs: np.ndarray) -> np.ndarray:
+    def _field_center_radecs(self, df: pd.DataFrame, pointing_radecs: np.ndarray) -> np.ndarray:
         """Lookup-table center of each row's observed field, in radians.
 
         Parameters
