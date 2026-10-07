@@ -769,6 +769,34 @@ class MultiStepEvaluator(Evaluator):
             field_ids=field_ids, glob_df=glob_df, candidate_feat_dict=candidate_feat_dict,
         )
 
+    def _local_manifest(self, manifest: dict) -> dict:
+        """Resolve manifest paths by basename under <outdir>/nights.
+
+        The manifest may store absolute paths from the training machine; the
+        night CSV/npz files always live in <outdir>/nights with these basenames.
+
+        Parameters
+        ----------
+        manifest : dict
+            Night key -> stored night CSV path (None for an empty night).
+
+        Returns
+        -------
+        dict
+            Night key -> local night CSV path (None for an empty night).
+        """
+        nights_dir = self.outdir / 'nights'
+        return {k: (nights_dir / Path(v).name) if v is not None else None
+                for k, v in manifest.items()}
+
+    def _save_missing_movies(self) -> None:
+        """Render movies for cached nights that have none, from the night CSVs."""
+        episode = self.eval_metrics['ep-0']
+        if not (isinstance(episode, dict) and 'manifest' in episode):
+            logger.warning("Cached eval_metrics has no night manifest; cannot render movies from CSVs.")
+            return
+        self.runner.save_missing_movies(self._local_manifest(episode['manifest']), ep_num=0)
+
     def _process_eval_metrics(self, eval_metrics):
         # Deterministic eval: single episode.
         episode = eval_metrics['ep-0']
