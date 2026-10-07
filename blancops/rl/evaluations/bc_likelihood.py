@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from blancops.configs.experiment_schema import load_and_validate
-from blancops.data.feature_cache import DatasetCache
+from blancops.data.dataset import TransitionDatasetCache
 from blancops.configs.paths import RunPaths
 from blancops.rl.agent_factory import AgentFactory
 
@@ -72,12 +72,12 @@ def loader_from_cache(
     num_workers: int = 0,
     pin_memory: bool = False,
 ) -> DataLoader:
-    """Build a DataLoader over one split's transitions from a saved DatasetCache.
+    """Build a DataLoader over one split's transitions from a saved TransitionDatasetCache.
 
     Expands per-state tensors to per-transition via curr_compact_idxs,
     mirroring the val_loader in OfflineDataset (shuffle=False, drop_last=False).
     """
-    cache = DatasetCache.load(cache_path)
+    cache = TransitionDatasetCache.load(cache_path)
     states_tr, bin_states_tr, actions, masks_tr = cache.to_transition_tensors()
 
     dataset = TensorDataset(states_tr, actions, masks_tr, bin_states_tr)
