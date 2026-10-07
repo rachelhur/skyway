@@ -1,7 +1,8 @@
-"""Forward-simulation environment driven by explicit date strings."""
+"""Forward-simulation environment over resolved observing windows."""
 from __future__ import annotations
 
-from datetime import datetime, date
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -9,7 +10,7 @@ import numpy as np
 from blancops.environment.base import StateSnapshot
 from blancops.environment.offline_base import BaseBlancoOfflineEnv
 from blancops.environment.field_mask_schedule import resolve_positional_mask
-from blancops.data.features.glob_features import calc_twilight, get_night_boundaries
+from blancops.data.features.glob_features import get_night_boundaries
 from blancops.environment.seeing_model import ConstantSeeingModel, PredictiveSeeingModel
 from blancops.survey.profiles import DES
 from blancops.ephemerides.time_utils import unix_to_datetime
@@ -17,9 +18,90 @@ from blancops.ephemerides.time_utils import unix_to_datetime
 import logging
 logger = logging.getLogger(__name__)
 
+NIGHT_PORTIONS = ("full", "half1", "half2")
+
+
+@dataclass(frozen=True)
+class ObservingWindow:
+    """One night's observing window; timestamps are unix s (UTC).
+
+    Parameters
+    ----------
+    label : str
+        Night name used in output file names, starting with the evening date.
+    start_ts, end_ts : float
+        Observing start and end.
+    sunset_ts, sunrise_ts : float
+        That night's sunset and sunrise at the sun elevation limit.
+    """
+    label: str
+    start_ts: float
+    end_ts: float
+    sunset_ts: float
+    sunrise_ts: float
+
+
+def resolve_observing_windows(
+    sun_el_limit: float,
+    *,
+    observing_nights: Optional[list[str]] = None,
+    start_time: Optional[float] = None,
+    stop_time: Optional[float] = None,
+) -> list[ObservingWindow]:
+    """Observing windows from night strings or from one exact start/stop window.
+
+    Parameters
+    ----------
+    sun_el_limit : float
+        Highest sun elevation for observing, in degrees.
+    observing_nights : list of str, optional
+        Night strings `YYYY-MM-DD-<portion>`, portion in `NIGHT_PORTIONS`.
+    start_time, stop_time : float, optional
+        Window start and stop (unix s). A missing end is that night's sunset or sunrise.
+
+    Returns
+    -------
+    list of ObservingWindow
+        One window per night string, or a single window labeled `<evening date>-window`.
+    """
+    limit = sun_el_limit - 0.1
+    has_window = start_time is not None or stop_time is not None
+    if bool(observing_nights) == has_window:
+        raise ValueError("Give either --observing_nights or --start_time / --stop_time, not both or neither.")
+
+    if has_window:
+        anchor = start_time if start_time is not None else stop_time
+        sunset_ts, sunrise_ts = get_night_boundaries(float(anchor), limit)
+        start_ts = sunset_ts if start_time is None else float(start_time)
+        end_ts = sunrise_ts if stop_time is None else float(stop_time)
+        if not (sunset_ts <= start_ts < end_ts <= sunrise_ts):
+            raise ValueError(
+                f"The window must start before it stops and lie within one night at "
+                f"sun_el_limit={sun_el_limit}: sunset {unix_to_datetime(sunset_ts):%Y-%m-%d %H:%M:%S}, "
+                f"sunrise {unix_to_datetime(sunrise_ts):%Y-%m-%d %H:%M:%S} UTC."
+            )
+        evening_date = (unix_to_datetime(sunset_ts) - timedelta(hours=12)).date()
+        return [ObservingWindow(label=f"{evening_date}-window", start_ts=start_ts, end_ts=end_ts,
+                     sunset_ts=sunset_ts, sunrise_ts=sunrise_ts)]
+
+    windows = []
+    for night_str in observing_nights:
+        date_str, _, portion = night_str.rpartition("-")
+        if portion not in NIGHT_PORTIONS:
+            raise ValueError(f"Observing night {night_str!r} must end in one of {', '.join(NIGHT_PORTIONS)}.")
+        sunset_ts, sunrise_ts = get_night_boundaries(datetime.strptime(date_str, "%Y-%m-%d").date(), limit)
+        mid_ts = sunset_ts + (sunrise_ts - sunset_ts) / 2
+        windows.append(ObservingWindow(
+            label=night_str,
+            start_ts=mid_ts if portion == "half2" else sunset_ts,
+            end_ts=mid_ts if portion == "half1" else sunrise_ts,
+            sunset_ts=sunset_ts, sunrise_ts=sunrise_ts,
+        ))
+    return windows
+
 
 class OfflineBlancoEnv(BaseBlancoOfflineEnv):
-    """Multi-night forward simulation from explicit date strings.
+    """Multi-night forward simulation over resolved observing windows.
 
     Accepts optional seeds (counts, last-visit OT timestamps, OT clock at
     sunset of night 0) for continuing a survey mid-stream. With nothing
@@ -37,13 +119,11 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         constraints_cfg,
         lookups,
         norm_stats,
-        observing_night_strs: list[str],
+        observing_windows: list[ObservingWindow],
         initial_counts: Optional[np.ndarray] = None,
         initial_last_visit_ot: Optional[np.ndarray] = None,
         initial_ot_at_sunset: float = 0.0,
         initial_fwhm: Optional[float] = None,
-        start_time: Optional[float] = None,
-        stop_time: Optional[float] = None,
         downtime_windows=None,
         seeing_trajectory=None,
         field_mask_schedule=None,
@@ -51,9 +131,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         survey=DES,
         reset_counts_on_exhaustion: bool = False,
     ):
-        # Parse before super so max_nights is known in time.
-        self._night_strs = list(observing_night_strs)
-        self._night_info = self._parse_night_strs(observing_night_strs)
+        self._observing_windows = list(observing_windows)
         # Initialize mask state before super().__init__ so any action-mask
         # refresh during base init is safe (schedule disabled => identity); the
         # positional masks are resolved once _fids exists, then enabled below.
@@ -66,16 +144,14 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
             norm_stats=norm_stats,
             telescope=telescope,
             survey=survey,
-            max_nights=len(self._night_info),
+            max_nights=len(self._observing_windows),
             reset_counts_on_exhaustion=reset_counts_on_exhaustion,
         )
+        self._check_windows_within_nights()
         self._initial_counts = initial_counts
         self._initial_last_visit_ot = initial_last_visit_ot
         self._initial_ot_at_sunset = float(initial_ot_at_sunset)
 
-        # Optional start, stop, and downtime intervals
-        self._start_time = None if start_time is None else float(start_time)
-        self._stop_time = None if stop_time is None else float(stop_time)
         # Wall-clock intervals in which the telescope was not observing, as
         # (start, end) unix timestamps. Replays idle through them so that a
         # simulated night covers the same observing time a real one did.
@@ -140,26 +216,26 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
                 )
             self._field_mask_schedule = field_mask_schedule
 
-    @staticmethod
-    def _parse_night_strs(night_strs: list[str]) -> list[tuple[date, str]]:
-        """Parse strings like '2026-06-23-half1' or '2026-06-23-full'.
-
-        Returns a `date` (the evening date), not a `datetime`, so
-        get_night_boundaries uses it as the canonical evening-date instead of
-        treating it as a midnight-UTC instant in the prior local evening.
-        """
-        parsed = []
-        for s in night_strs:
-            parts = s.split("-")
-            night_date = datetime.strptime(
-                "-".join(parts[:3]), "%Y-%m-%d"
-            ).date()
-            parsed.append((night_date, parts[-1]))
-        return parsed
-
     # -----------------------------------------------------------------------
     # OfflineBlancoEnv hooks
     # -----------------------------------------------------------------------
+
+    def _check_windows_within_nights(self) -> None:
+        """Raise if a window is not inside its night at this env's `sun_el_limit`.
+
+        Raises
+        ------
+        ValueError
+            A window starts before sunset or ends after sunrise, as computed by
+            `get_night_boundaries(..., sun_el_limit - 0.1)`.
+        """
+        for window in self._observing_windows:
+            sunset_ts, sunrise_ts = get_night_boundaries(window.sunset_ts, self.sun_el_limit - 0.1)
+            if not (sunset_ts <= window.start_ts < window.end_ts <= sunrise_ts):
+                raise ValueError(
+                    f"Observing window {window.label!r} is not inside its night at the env's "
+                    f"sun_el_limit={self.sun_el_limit}; resolve it with the same sun_el_limit."
+                )
 
     def _begin_episode(self) -> None:
         # Restart OT cascade and night cache on every reset; otherwise
@@ -190,38 +266,15 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         self._seeing_model = model
 
     def night_label(self, night_idx: int) -> str:
-        """The requested night string, e.g. '2026-06-23-half2'."""
-        return self._night_strs[night_idx]
+        """The window's label, e.g. '2026-06-23-half2' or '2026-06-23-window'."""
+        return self._observing_windows[night_idx].label
 
     def _get_night_config(self, night_idx: int) -> dict:
         if night_idx in self._night_cfg_cache:
             return self._night_cfg_cache[night_idx]
 
-        night_dt, portion = self._night_info[night_idx]
-        sunset_ts, sunrise_ts = get_night_boundaries(
-            night_dt, self.sun_el_limit - 0.1
-        )
-
-        start_ts, end_ts = sunset_ts, sunrise_ts
-        if portion == "half1":
-            end_ts = sunset_ts + (sunrise_ts - sunset_ts) / 2
-        elif portion == "half2":
-            start_ts = sunset_ts + (sunrise_ts - sunset_ts) / 2
-
-        if self._start_time is not None and start_ts < self._start_time < end_ts:
-            logger.info(
-                "Night start clamped from %s to start_time %s",
-                unix_to_datetime(start_ts), unix_to_datetime(self._start_time),
-            )
-            start_ts = self._start_time
-
-        if self._stop_time is not None and start_ts < self._stop_time < end_ts:
-            logger.info(
-                "Night end clamped from %s to stop_time %s",
-                unix_to_datetime(end_ts), unix_to_datetime(self._stop_time),
-            )
-            end_ts = self._stop_time
-
+        window = self._observing_windows[night_idx]
+        start_ts, sunset_ts = window.start_ts, window.sunset_ts
 
         # Anchor ot_at_sunset so that
         #     ot_now @ start_ts  ==  OT clock at the moment we rolled
@@ -242,45 +295,9 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
             )
         ot_at_sunset = prev_OT_at_rollover - (start_ts - sunset_ts)
 
-        cfg = {
-            "start_ts": start_ts,
-            "end_ts": end_ts,
-            "sunset_ts": sunset_ts,
-            "sunrise_ts": sunrise_ts,
-            "ot_at_sunset": ot_at_sunset,
-        }
+        cfg = dict(asdict(window), ot_at_sunset=ot_at_sunset)
         self._night_cfg_cache[night_idx] = cfg
         return cfg
-    # def _get_night_config(self, night_idx: int) -> dict:
-    #     # Idempotent re-read for the same night (diagnostics, tests).
-    #     if night_idx in self._night_cfg_cache:
-    #         return self._night_cfg_cache[night_idx]
-
-    #     night_dt, portion = self._night_info[night_idx]
-    #     # ts = night_dt.timestamp()
-    #     sunset_ts, sunrise_ts = get_night_boundaries(night_dt, self.sun_el_limit - .1)
-
-    #     # sunset = calc_twilight(ts, "set", self.sun_el_limit)
-    #     # sunrise = calc_twilight(ts, "rise", self.sun_el_limit)
-
-    #     start_ts, end_ts = sunset_ts, sunrise_ts
-    #     if portion == "half1":
-    #         end_ts = sunset_ts + (sunrise_ts - sunset_ts) / 2
-    #     elif portion == "half2":
-    #         start_ts = sunset_ts + (sunrise_ts - sunset_ts) / 2
-
-    #     cfg = {
-    #         "start_ts": start_ts,
-    #         "end_ts": end_ts,
-    #         "sunset_ts": sunset_ts,
-    #         "sunrise_ts": sunrise_ts,
-    #         "ot_at_sunset": self._running_ot_at_sunset,
-    #     }
-    #     self._night_cfg_cache[night_idx] = cfg
-    #     # Advance OT cascade for the next night: full sunset→sunrise
-    #     # span, irrespective of half-night portion. See class docstring.
-    #     self._running_ot_at_sunset += (end_ts - start_ts)
-    #     return cfg
 
     def _build_night_start_snapshot(self, night_idx: int) -> StateSnapshot:
         cfg = self._get_night_config(night_idx)

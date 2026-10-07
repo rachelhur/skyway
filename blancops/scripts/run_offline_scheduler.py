@@ -19,7 +19,7 @@ from blancops.data.seeing_trajectory import extract_night_seeing_trajectory
 from blancops.utils.sys_utils import seed_everything
 from blancops.io.logger_utils import configure_logger
 from blancops.utils.sys_utils import get_system_device
-from blancops.environment.offline_env import OfflineBlancoEnv
+from blancops.environment.offline_env import OfflineBlancoEnv, resolve_observing_windows
 from blancops.environment.field_mask_schedule import FieldMaskSchedule
 
 import argparse
@@ -38,17 +38,19 @@ def get_args():
                         help='If provided, seed the first night from a prior observing history. '
                              'Accepts a schedule CSV (.csv) or a live observing log (.jsonl/.json).')
 
-    # Observing nights
+    # Observing time: either whole nights (--observing_nights) or one exact window
+    # (--start_time / --stop_time), not both.
+    parser.add_argument('-d', '--observing_nights', type=str, nargs='+', default=None,
+                        help="Observing nights to schedule, one window each. Format YYYY-MM-DD-NIGHT where "
+                             "NIGHT is one of 'full', 'half1', 'half2' (e.g. 2026-06-23-full). "
+                             "Cannot be combined with --start_time / --stop_time.")
     parser.add_argument('--start_time', type=float, default=None,
-                        help="Unix timestamp at which every simulated night begins."
-                        "A different start time for each night is not supported.")
+                        help="Unix timestamp at which a single observing window starts. Without "
+                             "--stop_time the window ends at that night's sunrise. The window must lie "
+                             "within one night, when the sun is below --sun_el_limit.")
     parser.add_argument('--stop_time', type=float, default=None,
-                        help="Unix timestamp at which every simulated night ends."
-                        "A different stop time for each night is not supported.")
-    parser.add_argument('-d', '--observing_nights', type=str, nargs='*', default=['2026-06-23-half2', '2026-06-24-half2'],
-                        help="List of observing nights. Format [YY-MM-DD-NIGHT, ...] where NIGHT is one of " +
-                        "'full', 'half1', 'half2' (e.g. 2026-06-23-full)"
-                        )
+                        help="Unix timestamp at which a single observing window stops. Without "
+                             "--start_time the window starts at that night's sunset.")
 
     # Output
     parser.add_argument('-o', '--outdir', type=Path, required=True, help='Relative path to output directory')
@@ -127,6 +129,13 @@ def get_args():
     args = parser.parse_args()
     if args.save_observing_script and not args.propid:
         parser.error("--propid is required with --save_observing_script")
+    try:
+        args.observing_windows = resolve_observing_windows(
+            args.sun_el_limit, observing_nights=args.observing_nights,
+            start_time=args.start_time, stop_time=args.stop_time,
+        )
+    except ValueError as e:
+        parser.error(str(e))
     return args
 
 
@@ -265,14 +274,12 @@ def main():
                                           airmass_failsafe=args.airmass_limit), # extra failsafe for live scheduler
         lookups=lookups,
         norm_stats=norm_stats,
-        observing_night_strs=args.observing_nights,
+        observing_windows=args.observing_windows,
         initial_counts=initial_counts,
         initial_last_visit_ot=initial_last_visit_ot,
         initial_ot_at_sunset=initial_ot_at_sunset,
         initial_fwhm=args.initial_fwhm,
         seeing_trajectory=seeing_trajectory,
-        start_time=args.start_time,
-        stop_time=args.stop_time,
         downtime_windows=downtime_windows,
         field_mask_schedule=field_mask_schedule,
         reset_counts_on_exhaustion=args.reset_counts_on_exhaustion,

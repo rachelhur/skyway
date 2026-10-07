@@ -627,28 +627,26 @@ class BaseBlancoEnv(gym.Env, ABC):
         """Whether the configured reward includes a term."""
         return self._reward_cfg is not None and term in self._reward_cfg.terms
 
-    def _needs_seeing_model(self) -> bool:
-        """Whether the fwhm feature, or a teff-based or uniformity reward term (via predicted teff), needs a seeing model."""
-        return ("fwhm" in self.global_feature_names or self._uses_reward_term(RewardTerm.TEFF)
-                or self._uses_reward_term(RewardTerm.TEFF_ACCEPTED)
-                or self._uses_reward_term(RewardTerm.UNIFORMITY) or self.field_level)
+    def _uses_teff_reward(self) -> bool:
+        """Whether a reward term reads the step's predicted teff."""
+        return self._uses_reward_term(RewardTerm.TEFF) or self._uses_reward_term(RewardTerm.TEFF_ACCEPTED)
 
-    def _step_is_valid(self, s: dict | None) -> bool:
-        """Whether a step's exposure is valid: predicted teff above the survey threshold (strict, as offline).
+    def _needs_seeing_model(self) -> bool:
+        """Whether the fwhm feature or a teff-based reward term (via predicted teff) needs a seeing model."""
+        return "fwhm" in self.global_feature_names or self._uses_teff_reward()
+
+    def _cache_step_reward_inputs(self, s: dict) -> None:
+        """Store a step's exposure-time reward inputs on its record, before the step can roll into the next night.
 
         Parameters
         ----------
-        s : dict or None
-            Step record with field_id, filter_idx, and t_start; None on WAIT.
-
-        Returns
-        -------
-        bool
-            False on WAIT or an invalid exposure.
+        s : dict
+            Step record with field_id, filter_idx, and t_start; gains 'uniformity' and, when a
+            teff-based term is used, 'teff_pred'.
         """
-        if s is None:
-            return False
-        return bool(self._teff_pred(s) > self._min_teff(s))
+        if self._uses_teff_reward():
+            self._teff_pred(s)
+        s['uniformity'] = self._uniformity_step_inputs(s)
 
     def _teff_pred(self, s: dict) -> float:
         """Predicted teff of a step."""
@@ -663,9 +661,6 @@ class BaseBlancoEnv(gym.Env, ABC):
     def _uniformity_step_inputs(self, s: dict) -> dict | None:
         """Uniformity reward inputs from survey counts before this exposure; None when the term is unused.
 
-        An exposure whose predicted teff is at or below the survey threshold earns no uniformity credit
-        (pass_size 0), though it still counts in the tracker.
-
         Parameters
         ----------
         s : dict
@@ -679,10 +674,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         if not self._uses_reward_term(RewardTerm.UNIFORMITY):
             return None
         tracker = self._survey_progress_tracker
-        inputs = uniformity_inputs(tracker.raw_counts, tracker.target_counts, s['field_id'], s['filter_idx'])
-        if not self._step_is_valid(s):
-            inputs['pass_size'] = np.zeros(1)
-        return inputs
+        return uniformity_inputs(tracker.raw_counts, tracker.target_counts, s['field_id'], s['filter_idx'])
 
     def _get_rewards(self) -> float:
         """Reward for the last step, from the dataset's reward terms and the training reward stats.
@@ -703,7 +695,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         params = self._telescope.parameters
         return {
             RewardTerm.EXPERT: lambda: dict(n_transitions=1),
-            RewardTerm.TEFF: lambda: dict(teff=np.array([self._predict_teff(s)])),
+            RewardTerm.TEFF: lambda: dict(teff=np.array([self._teff_pred(s)])),
             RewardTerm.TEFF_ACCEPTED: lambda: dict(
                 teff=np.array([self._teff_pred(s)]), min_teff=np.array([self._min_teff(s)]),
                 exptime=np.array([self._get_exposure_time(s['field_id'], s['filter_idx'])])),

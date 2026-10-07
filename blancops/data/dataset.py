@@ -745,10 +745,10 @@ class TransitionDataset(torch.utils.data.Dataset):
 
         count_before = count at night start (lookups.night2fidfilt_visit_hist) + earlier exposures of the
         field-filter that night; filter_mean m_b = (night-start sum of counts over in-plan fields + earlier
-        in-plan exposures in the filter that night) / W_b, with W_b the filter's total target. Only valid
-        exposures (teff above the survey threshold, as in the lookups) advance completion: a failed
-        exposure has pass_size 0, so its reward is 0 and it does not count toward later ones. All rows of
-        the night are scanned, including rows whose transitions were dropped.
+        in-plan exposures in the filter that night) / W_b, with W_b the filter's total target. Every exposure
+        of the night earns its pass size and advances the counts whatever its teff; night-start counts hold
+        accepted exposures only. All rows of the night are scanned, including rows whose transitions were
+        dropped.
 
         Parameters
         ----------
@@ -774,10 +774,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         inv_target = np.divide(1.0, targets, out=np.zeros_like(targets), where=in_plan)
 
         is_exposure, field_ids, filter_idxs = self._exposure_field_filter_idxs(df)
-        teff = df['teff'].to_numpy()
-        # compare in teff's own dtype, as the scalar threshold did (float32 0.3 is not above float32 0.3)
-        is_valid = is_exposure & (teff > self._band_threshold[filter_idxs].astype(teff.dtype))
-        pass_size = np.where(is_valid, inv_target[field_ids, filter_idxs], 0.0)
+        pass_size = np.where(is_exposure, inv_target[field_ids, filter_idxs], 0.0)
 
         count_start = np.zeros(len(df))
         sum_n_start = np.zeros(len(df))
@@ -789,11 +786,11 @@ class TransitionDataset(torch.utils.data.Dataset):
         exposures = pd.DataFrame({
             'night': df['night'].to_numpy(), 'field_id': field_ids,
             'filter_idx': filter_idxs, 'in_plan': (pass_size > 0).astype(float),
-        })[is_valid]
+        })[is_exposure]
         earlier_visits = np.zeros(len(df))
         earlier_in_plan = np.zeros(len(df))
-        earlier_visits[is_valid] = exposures.groupby(['night', 'field_id', 'filter_idx']).cumcount().to_numpy()
-        earlier_in_plan[is_valid] = (
+        earlier_visits[is_exposure] = exposures.groupby(['night', 'field_id', 'filter_idx']).cumcount().to_numpy()
+        earlier_in_plan[is_exposure] = (
             exposures.groupby(['night', 'filter_idx'])['in_plan'].cumsum() - exposures['in_plan']
         ).to_numpy()
 
