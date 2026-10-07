@@ -332,3 +332,46 @@ class RunPaths:
         """Create the run's standard sub-directories."""
         for d in (self.figures, self.checkpoints, self.metrics, self.configs, self.logs):
             d.mkdir(parents=True, exist_ok=True)
+
+
+# ------------------------------------------------------------------ #
+# Offline-rollout directory layout                                   #
+# ------------------------------------------------------------------ #
+
+@dataclass(frozen=True)
+class OfflineRunPaths:
+    """Directory layout of one offline rollout (`OfflineRunner` / `run-offline-scheduler` outdir).
+
+    Parameters
+    ----------
+    root : Path
+        Rollout output directory.
+    """
+
+    root: Path
+    LOG = "offline_scheduler.log"
+
+    def __post_init__(self):
+        object.__setattr__(self, "root", Path(self.root))
+
+    @property
+    def nights(self) -> Path:
+        """Per-night schedule CSVs (and optional observation arrays)."""
+        return self.root / "nights"
+
+    @property
+    def observing_scripts(self) -> Path:
+        """Schedules in the telescope's own format, e.g. SISPI JSON for Blanco."""
+        return self.root / "observing_scripts"
+
+    @property
+    def plots(self) -> Path:
+        return self.root / "plots"
+
+    @property
+    def rollout_info(self) -> Path:
+        return self.root / "rollout_info.pkl"
+
+    @property
+    def log(self) -> Path:
+        return self.root / self.LOG

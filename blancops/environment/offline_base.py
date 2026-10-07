@@ -31,7 +31,9 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
         to seed that night's initial state
     """
 
-    def __init__(self, *, max_nights: int, **kwargs):
+    def __init__(self, *, max_nights: int, reset_counts_on_exhaustion: bool = False, **kwargs):
+        # Read by _update_action_masks, which base init already calls.
+        self._reset_counts_on_exhaustion = reset_counts_on_exhaustion
         super().__init__(**kwargs)
         self.max_nights = max_nights
 
@@ -47,6 +49,21 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
 
 
     @abstractmethod
+    def night_label(self, night_idx: int) -> str:
+        """Unique, human-readable name of night `night_idx`, starting with its evening date (YYYY-MM-DD).
+
+        Parameters
+        ----------
+        night_idx : int
+            Episode-local night index (0..max_nights-1).
+
+        Returns
+        -------
+        str
+            Night name, used in output file names.
+        """
+
+    @abstractmethod
     def _build_night_start_snapshot(self, night_idx: int) -> StateSnapshot:
         """Construct the snapshot to seed `night_idx`'s initial state.
 
@@ -54,6 +71,39 @@ class BaseBlancoOfflineEnv(BaseBlancoEnv):
         with no seed) or returns a snapshot that only sets the timestamp,
         leaving visit counters to carry forward.
         """
+
+    # -----------------------------------------------------------------------
+    # Gym contract additions to BaseBlancoEnv (OfflineRunner requires these)
+    # -----------------------------------------------------------------------
+
+    def get_info(self) -> dict:
+        """Base info plus the current night's label and the last exposure's step record.
+
+        Returns
+        -------
+        dict
+            `BaseBlancoEnv.get_info()` with `night_label` (str) and `step_record`
+            (dict with dead_time, t_start, ...; None after a WAIT or at reset).
+        """
+        info = super().get_info()
+        info['night_label'] = self.night_label(self._night_idx)
+        info['step_record'] = dict(self._step_record) if self._step_record is not None else None
+        return info
+
+    def _update_action_masks(self):
+        """Action mask; when enabled, zeroes the visit counts once every action is masked.
+
+        With `reset_counts_on_exhaustion`, an empty mask while the survey is incomplete
+        restarts the visit counts and recomputes the mask, as a live restart against a
+        fresh history would.
+        """
+        mask = super()._update_action_masks()
+        if (self._reset_counts_on_exhaustion and not mask.any()
+                and not self._survey_progress_tracker.check_completion()):
+            logger.warning(f"No action available at {unix_to_datetime(self._ts)}; zeroing visit counts.")
+            self._survey_progress_tracker.zero_counts()
+            mask = super()._update_action_masks()
+        return mask
 
     # -----------------------------------------------------------------------
     # Concrete implementations of BaseBlancoEnv lifecycle hooks

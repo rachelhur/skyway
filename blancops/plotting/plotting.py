@@ -996,7 +996,8 @@ def plot_schedule_from_file(
     schedule_file : str
         Path to the schedule CSV file with keys "expert_timestamp" and/or
         "agent_timestamp", plus some combination of "expert_field_id", "agent_field_id",
-        "expert_bin_id", "agent_bin_id".
+        "expert_bin_id", "agent_bin_id". Without compare, unprefixed "timestamp",
+        "field_id", "bin_id" columns are also accepted.
     plot_type : str
         Type of plot: "field", "bin", or "fieldbin".
     nside : int [None]
@@ -1053,6 +1054,12 @@ def plot_schedule_from_file(
     alternate_label = "Agent Schedule" if expert else "Expert Schedule"
     primary_time_key = f"{primary_prefix}_timestamp"
     alternate_time_key = f"{alternate_prefix}_timestamp"
+
+    # single-schedule CSVs (e.g. offline runner nights/) use unprefixed columns
+    if not compare and primary_time_key not in schedule.columns and "timestamp" in schedule.columns:
+        schedule = schedule.rename(
+            columns={c: f"{primary_prefix}_{c}" for c in ("timestamp", "field_id", "bin_id")}
+        )
 
     # check for required columns
     if primary_time_key not in schedule.columns:

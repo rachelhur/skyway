@@ -84,6 +84,10 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     # OfflineBlancoEnv hooks
     # -----------------------------------------------------------------------
 
+    def night_label(self, night_idx: int) -> str:
+        """The night's evening date, e.g. '2017-08-15'."""
+        return str(self._night_keys[night_idx])
+
     def _get_night_config(self, night_idx: int) -> dict:
         """Build the per-night timing/seed config.
 

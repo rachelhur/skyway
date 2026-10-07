@@ -49,8 +49,10 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         field_mask_schedule=None,
         telescope=None,
         survey=DES,
+        reset_counts_on_exhaustion: bool = False,
     ):
         # Parse before super so max_nights is known in time.
+        self._night_strs = list(observing_night_strs)
         self._night_info = self._parse_night_strs(observing_night_strs)
         # Initialize mask state before super().__init__ so any action-mask
         # refresh during base init is safe (schedule disabled => identity); the
@@ -65,6 +67,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
             telescope=telescope,
             survey=survey,
             max_nights=len(self._night_info),
+            reset_counts_on_exhaustion=reset_counts_on_exhaustion,
         )
         self._initial_counts = initial_counts
         self._initial_last_visit_ot = initial_last_visit_ot
@@ -185,6 +188,10 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
             el=traj["el"].to_numpy(dtype=float),
         )
         self._seeing_model = model
+
+    def night_label(self, night_idx: int) -> str:
+        """The requested night string, e.g. '2026-06-23-half2'."""
+        return self._night_strs[night_idx]
 
     def _get_night_config(self, night_idx: int) -> dict:
         if night_idx in self._night_cfg_cache:

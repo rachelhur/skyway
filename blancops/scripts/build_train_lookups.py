@@ -6,7 +6,6 @@ from blancops.data.lookup_tables import TrainLookupTables
 from blancops.math import units
 
 from blancops.configs.paths import lookups_dir, resolve_data_dir, workspace
-from blancops.configs.constants import FILTER2IDX
 from blancops.configs.enums import AcceptanceRule, LookupKeys
 import matplotlib.pyplot as plt
 import warnings
@@ -72,6 +71,7 @@ def main():
     # BUILD LOOKUPS
     # --------------------------------------
     lookups = build_DES_lookups(fits_path=args.fits_path, outdir=lookups_outdir, acceptance=args.acceptance)
+    filter2idx = lookups.survey.filter2idx
     save = args.save_plots
 
     # --------------------------------------
@@ -94,7 +94,7 @@ def main():
 
         # Plot target counts
         fig, ax = plt.subplots(figsize=_FIGSIZE)
-        for filt, fidx in FILTER2IDX.items():
+        for filt, fidx in filter2idx.items():
             ax.scatter(np.arange(len(lookups.fields)), lookups.target_fidfilt_counts[:, fidx], label=filt, s=5, alpha=.5)
         ax.set_xlabel('Field id')
         ax.set_ylabel('Counts')
@@ -108,7 +108,7 @@ def main():
         visits = np.array(list(lookups.night2fidfilt_visit_hist.values()))
         mean_visits = visits.mean(axis=1)
         std_visits = visits.std(axis=1)
-        for filt, fidx in FILTER2IDX.items():
+        for filt, fidx in filter2idx.items():
             ax.plot(np.arange(len(mean_visits)), mean_visits[:, fidx], label=filt, color=f"C{fidx}")
             ax.fill_between(
                 np.arange(len(lookups.night2fidfilt_visit_hist)),
@@ -141,7 +141,7 @@ def main():
             mean_times = np.nanmean(t_since_last_visit, axis=1)
             std_times = np.nanstd(t_since_last_visit, axis=1)
 
-        for filt, fidx in FILTER2IDX.items():
+        for filt, fidx in filter2idx.items():
             night_idxs = np.arange(len(mean_times))
             _filt_means = mean_times[:, fidx]
             _filt_stds = std_times[:, fidx]
@@ -167,8 +167,8 @@ def main():
         # --------------------------------------
 
         fig, axes = plt.subplots(
-            nrows=len(FILTER2IDX), ncols=1,
-            figsize=(8, 2 * len(FILTER2IDX)),
+            nrows=len(filter2idx), ncols=1,
+            figsize=(8, 2 * len(filter2idx)),
             sharex=True,
         )
 
@@ -200,7 +200,7 @@ def main():
         # contributing shape: (n_nights, n_filters)
 
         night_idxs = np.arange(pct.shape[1])
-        for (filt, fidx), ax in zip(FILTER2IDX.items(), axes):
+        for (filt, fidx), ax in zip(filter2idx.items(), axes):
             ax2 = ax.twinx()
             p10, p50, p90 = pct[0, :, fidx], pct[1, :, fidx], pct[2, :, fidx]
             ax.plot(night_idxs, p50, color=f"C{fidx}", label=f"{filt} median")

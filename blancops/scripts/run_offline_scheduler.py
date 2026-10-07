@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import gymnasium as gym
 
-from blancops.configs.paths import RunPaths, workspace
+from blancops.configs.paths import OfflineRunPaths, RunPaths, workspace
 from blancops.configs.experiment_schema import ActionConstraints
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.offline_runner import OfflineRunner
@@ -31,55 +31,79 @@ def get_args():
 
     # Model choice
     parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1", help='Model alias or relative path to trained model directory')
-    parser.add_argument('-c', '--field_choice_method', type=str, default='interp', choices=['random', 'interp'], help="Field selection method within a chosen bin.")
-    parser.add_argument('--action_decode', type=str, default='joint', choices=['joint', 'filter_first'], help="Bin/filter decode: 'joint' argmax, or 'filter_first' (choose filter over all visible bins, then best available bin).")
-    parser.add_argument('--dump_moonset_q', action='store_true', help="Print a one-shot per-filter Q breakdown at the first post-moonset step (diagnostic).")
 
-    # Field and Schedule info
-    parser.add_argument('--field_lookup_dir', type=Path, required=True, help='Relative path to field lookup dir')
-    parser.add_argument('-d', '--observing_nights', type=str, nargs='*', default=['2026-06-23-half2', '2026-06-24-half2'],
-                        help="List of observing nights. Format [YY-MM-DD-NIGHT, ...] (e.g. 2026-06-23-full)"
-                        )
+    # Fields
+    parser.add_argument('--field_lookup_dir', type=Path, required=True, help='Relative path to field lookup directory')
     parser.add_argument('--obs_history_filename', type=str, default=None,
                         help='If provided, seed the first night from a prior observing history. '
                              'Accepts a schedule CSV (.csv) or a live observing log (.jsonl/.json).')
 
-    # Output info
+    # Observing nights
+    parser.add_argument('--start_time', type=float, default=None,
+                        help="Unix timestamp at which every simulated night begins."
+                        "A different start time for each night is not supported.")
+    parser.add_argument('--stop_time', type=float, default=None,
+                        help="Unix timestamp at which every simulated night ends."
+                        "A different stop time for each night is not supported.")
+    parser.add_argument('-d', '--observing_nights', type=str, nargs='*', default=['2026-06-23-half2', '2026-06-24-half2'],
+                        help="List of observing nights. Format [YY-MM-DD-NIGHT, ...] where NIGHT is one of " +
+                        "'full', 'half1', 'half2' (e.g. 2026-06-23-full)"
+                        )
+
+    # Output
     parser.add_argument('-o', '--outdir', type=Path, required=True, help='Relative path to output directory')
-    parser.add_argument('--schedule_prefix', type=str, default='schedule', help='Base filename prefix for the generated schedule output')
-    parser.add_argument('--save_sispi', action='store_true', help='Whether to save SISPI-format json files.')
+    parser.add_argument('--schedule_prefix', type=str, default='schedule',
+                        help='Base filename prefix for the generated schedule output')
+    parser.add_argument('-s', '--save_observing_script', action='store_true',
+                        help="Whether to save schedules as the telescope's observing script (SISPI JSON for Blanco).")
+    parser.add_argument('--propid', type=str, default=None,
+                        help='Proposal id written to observing scripts. Required with --save_observing_script.')
+    parser.add_argument('--proposer', type=str, default='ai-scheduler', help='Proposer written to observing scripts.')
+    parser.add_argument('--program', type=str, default=None,
+                        help='Program name written to observing scripts. Required with --save_observing_script.')
+    parser.add_argument('--save_state_features', action='store_true',
+                        help="Whether to save per-night glob/bin observation arrays as _obs.npz files.")
+
+    # Plotting
     parser.add_argument('--save_movie', action='store_true', help='Whether to save gif files.')
     parser.add_argument('--save_mollweide', action='store_true', help='Whether to save png files.')
     parser.add_argument('--plot_bins', action='store_true',
                         help='Also draw HEALPix bins in movies of field-level models (bin-level models always draw them).')
-    parser.add_argument('--save_state_features', action='store_true', help='Whether to save per-night glob/bin observation arrays as _obs.npz files.')
 
     # Logging
     parser.add_argument('-l', '--logging_level', type=str, default='info', choices=['info', 'debug', 'warning', 'error'], help='Logging level.')
-    parser.add_argument('--overwrite', action='store_true', help='Whether to overwrite existing schedule if name already exists.')
+    parser.add_argument('--overwrite', action='store_true', help='Whether to overwrite existing schedule if already exists.')
     parser.add_argument('--seed', type=int, default=10, help='Random seed for schedule generation')
 
     # Scheduling parameters
-    parser.add_argument('--sun_el_limit', type=float, default=-12, help="How low below horizon sun needs to be for observing (in deg). Default is -12.")
-    parser.add_argument('--airmass_limit', type=float, default=1.8, help="The agent will only observe if there exist *any* fields below the airmass_lim")
+    parser.add_argument('--sun_el_limit', type=float, default=-12, help="Highest sun elevation (in deg) for observing. Default is -12.")
+    parser.add_argument('--airmass_limit', type=float, default=1.8,
+                        help="Only fields with airmass below this limit can be scheduled.")
     parser.add_argument('--initial_fwhm', type=float, default=0.9,
                         help="Assumed zenith delivered seeing (arcsec, r-band) for the forward sim, "
                              "projected per pointing by airmass/filter. Default 0.9 is the CTIO Blanco/DECam "
-                             "median. Only used when the model includes 'fwhm' as a global feature, and "
                              "ignored when --seeing_val_night is given.")
+
+    # Field masking (time-windowed field-id masks). Omit --mask_baseline_field_ids to disable.
+    parser.add_argument('--mask_baseline_field_ids', type=int, nargs='*', default=None,
+                        help='Field ids masked outside any mask window (baseline). If omitted, no masking is applied.')
+    parser.add_argument('--mask_baseline_mode', type=str, choices=['mask', 'keep_only'], default='mask',
+                        help="Baseline mask mode: 'mask' hides these field ids; 'keep_only' hides all others.")
+    parser.add_argument('--mask_window_start', type=float, default=None, help='Unix ts (UTC) start of the mask window.')
+    parser.add_argument('--mask_window_end', type=float, default=None, help='Unix ts (UTC) end of the mask window.')
+    parser.add_argument('--mask_window_field_ids', type=int, nargs='*', default=None,
+                        help='Field ids for the mask window rule.')
+    parser.add_argument('--mask_window_mode', type=str, choices=['mask', 'keep_only'], default='keep_only',
+                        help="Window mask mode: 'keep_only' hides all field ids except these during the window.")
+
+    # Diagnostics/legacy
+    parser.add_argument('-c', '--field_choice_method', type=str, default='interp', choices=['random', 'interp'], help="Field selection method within a chosen bin.")
+    parser.add_argument('--action_decode', type=str, default='joint', choices=['joint', 'filter_first'], help="Bin/filter decode: 'joint' argmax, or 'filter_first' (choose filter over all visible bins, then best available bin).")
+    parser.add_argument('--dump_moonset_q', action='store_true', help="Print a one-shot per-filter Q breakdown at the first post-moonset step (diagnostic).")
     parser.add_argument('--val_seeing_cache', type=Path,
                         default=RunPaths(workspace().deployable_models / 'bc_v1_max_feature_set').dataset_cache('val'),
                         help="Path to a val_dataset_cache.pt holding the validation-night DataFrame, "
                              "used with --seeing_val_night to replay a real night's measured seeing.")
-    parser.add_argument('--start_time', type=float, default=None,
-                        help="Unix timestamp at which every simulated night begins, when it "
-                             "falls inside the night. Pair with --stop_time to align a replay "
-                             "to the span a real night actually covered.")
-    parser.add_argument('--stop_time', type=float, default=None,
-                        help="Unix timestamp at which every simulated night ends, when it "
-                             "falls inside the night. Use to cut a replay at the moment the "
-                             "real night stopped, e.g. an operator ending before astronomical "
-                             "night end.")
     parser.add_argument('--downtime_csv', type=Path, default=None,
                         help="CSV with columns start, end (unix timestamps) giving intervals "
                              "in which the telescope was not observing. The replay idles "
@@ -100,22 +124,10 @@ def get_args():
                              "measured seeing trajectory to replay each sim night. Overrides --initial_fwhm. "
                              "Omit to use a constant --initial_fwhm.")
 
-    # Evaluation hyperparameters
-    parser.add_argument('--num_episodes', type=int, default=1, help='Number of evaluation episodes to run')
-
-    # Field masking (time-windowed field-id masks). Omit --mask_baseline_field_ids to disable.
-    parser.add_argument('--mask_baseline_field_ids', type=int, nargs='*', default=None,
-                        help='Field ids masked outside any mask window (baseline). If omitted, no masking is applied.')
-    parser.add_argument('--mask_baseline_mode', type=str, choices=['mask', 'keep_only'], default='mask',
-                        help="Baseline mask mode: 'mask' hides these field ids; 'keep_only' hides all others.")
-    parser.add_argument('--mask_window_start', type=float, default=None, help='Unix ts (UTC) start of the mask window.')
-    parser.add_argument('--mask_window_end', type=float, default=None, help='Unix ts (UTC) end of the mask window.')
-    parser.add_argument('--mask_window_field_ids', type=int, nargs='*', default=None,
-                        help='Field ids for the mask window rule.')
-    parser.add_argument('--mask_window_mode', type=str, choices=['mask', 'keep_only'], default='keep_only',
-                        help="Window mask mode: 'keep_only' hides all field ids except these during the window.")
-
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.save_observing_script and not args.propid:
+        parser.error("--propid is required with --save_observing_script")
+    return args
 
 
 def main():
@@ -142,7 +154,7 @@ def main():
         log_to_stdout=True,
         log_to_file=True,
         outdir=outdir,
-        filename='offline_schedule.log',
+        filename=OfflineRunPaths.LOG,
         use_tqdm=True
     )
 
@@ -169,12 +181,13 @@ def main():
     )
     runner = OfflineRunner(
         agent=agent, policy=agent.policy, cfg=model_cfg,
-        lookups=lookups, num_episodes=args.num_episodes, outdir=outdir,
-        save_SISPI=args.save_sispi, save_movie=args.save_movie,
+        lookups=lookups, telescope=lookups.survey.telescope,
+        outdir=outdir,
+        save_observing_script=args.save_observing_script, save_movie=args.save_movie,
+        observing_script_kwargs={'propid': args.propid, 'proposer': args.proposer, 'program': args.program},
         save_mollweide=args.save_mollweide,
         plot_bins=args.plot_bins,
         save_state_features=args.save_state_features,
-        reset_counts_on_exhaustion=args.reset_counts_on_exhaustion,
         dump_moonset_q=args.dump_moonset_q
     )
 
@@ -248,7 +261,8 @@ def main():
         id=f"gymnasium_env/{env_name}",
         cfg=model_cfg,
         constraints_cfg=ActionConstraints(sun_el_limit=args.sun_el_limit,
-                                          airmass_limit=args.airmass_limit),
+                                          airmass_limit=args.airmass_limit,
+                                          airmass_failsafe=args.airmass_limit), # extra failsafe for live scheduler
         lookups=lookups,
         norm_stats=norm_stats,
         observing_night_strs=args.observing_nights,
@@ -261,6 +275,7 @@ def main():
         stop_time=args.stop_time,
         downtime_windows=downtime_windows,
         field_mask_schedule=field_mask_schedule,
+        reset_counts_on_exhaustion=args.reset_counts_on_exhaustion,
     )
 
     # ---------------------------------

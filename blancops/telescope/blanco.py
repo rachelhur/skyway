@@ -18,10 +18,15 @@ References
 """
 from __future__ import annotations
 
+import json
+from collections import OrderedDict
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
+from blancops.math import units
 from blancops.telescope.base import TelescopeProfile
 from blancops.telescope.constraints import ConstraintSet, EquatorialLimit
 from blancops.telescope.parameters import SlewModel, TelescopeParameters
@@ -130,6 +135,107 @@ _CONSTRAINTS = _BlancoConstraints(
 )
 
 # ------------------------------------------------------------------ #
+# SISPI observing script                                             #
+# ------------------------------------------------------------------ #
+
+# SISPI, the Blanco control system, loads observing scripts as a JSON list with one exposure
+# entry per element. Layout from obztak's SISPI_DICT (kadrlica/obztak, obztak/field.py),
+# plus the optional `proposer` key.
+_EMPTY_SISPI_DICT = OrderedDict([
+    ("object",  None),
+    ("seqnum",  None), # 1-indexed
+    ("seqtot",  1),
+    ("seqid",   ""),
+    ("expTime", 90),
+    ("RA",      None),
+    ("dec",     None),
+    ("filter",  None),
+    ("count",   1),
+    ("expType", "object"),
+    ("program", None),
+    ("wait",    "False"),
+    ("propid",  None),
+    ("comment", ""),
+])
+
+
+def write_sispi(schedule_df: pd.DataFrame, name: str, save_dir: Path, lookups, *,
+                propid: str, proposer: str, program: str,
+                filter_override_val: str | None = None) -> Path:
+    """Write a schedule as a SISPI JSON script `<name>_sispi.json`, one exposure entry per row.
+
+    Parameters
+    ----------
+    schedule_df : pd.DataFrame
+        Time-ordered schedule with columns `timestamp` (unix s), `field_id` and `filter`.
+    name : str
+        Output filename stem.
+    save_dir : Path
+        Output directory.
+    lookups : LookupTables
+        Field coordinates (radians), names and per-(field, filter) exposure times.
+    propid : str
+        Proposal id written to every entry.
+    proposer : str
+        Proposer written to every entry.
+    program : str
+        Program name written to every entry.
+    filter_override_val : str or None, optional
+        Filter written to every entry instead of the scheduled filter.
+
+    Returns
+    -------
+    Path
+        Path of the written file.
+    """
+    if not propid:
+        raise ValueError("A propid is required to write a SISPI file.")
+    timestamps = schedule_df['timestamp'].to_numpy(dtype=float)
+    if (np.diff(timestamps) < 0).any():
+        raise ValueError("SISPI schedule timestamps must be in time order.")
+    dts = pd.to_datetime(timestamps, utc=True, unit='s')
+    outpath = Path(save_dir) / f"{name}_sispi.json"
+
+    field_ids = schedule_df['field_id'].to_numpy(dtype=int)
+    if filter_override_val is not None:
+        filters = [filter_override_val] * len(field_ids)
+    else:
+        filters = schedule_df['filter'].to_list()
+    filter_idxs = np.array([lookups.survey.filter2idx[f] for f in filters], dtype=int)
+
+    exptimes = lookups.fidfilt_exptime[field_ids, filter_idxs].astype(int)
+    if (exptimes <= 0).any():
+        bad = sorted({(int(f), filt) for f, filt, t in zip(field_ids, filters, exptimes) if t <= 0})
+        raise ValueError(f"Scheduled (field_id, filter) pairs have no positive exposure time: {bad}")
+
+    names = lookups.fields['field'].to_numpy()[field_ids]
+    ras = lookups.fields['ra'].to_numpy()[field_ids] / units.deg
+    decs = lookups.fields['dec'].to_numpy()[field_ids] / units.deg
+
+    sispi_list = []
+    for i in range(len(field_ids)):
+        obs = _EMPTY_SISPI_DICT.copy()
+        obs.update({
+            "object": str(names[i]),
+            "seqnum": 1,
+            "seqtot": 1,
+            "seqid": f"datetime: {dts[i].isoformat(timespec='seconds')}",
+            "expTime": int(exptimes[i]),
+            "RA": round(float(ras[i]), 5),
+            "dec": round(float(decs[i]), 5),
+            "filter": filters[i],
+            "program": program,
+            "propid": propid,
+            "proposer": proposer,
+        })
+        sispi_list.append(obs)
+
+    with open(outpath, 'w') as f:
+        json.dump(sispi_list, f, indent=4)
+    return outpath
+
+
+# ------------------------------------------------------------------ #
 # Primary profile — DECam broadband                                   #
 # ------------------------------------------------------------------ #
 
@@ -139,4 +245,5 @@ BLANCO = TelescopeProfile(
     site=_SITE,
     parameters=_PARAMS,
     constraints=_CONSTRAINTS,
+    observing_script_writer=write_sispi,
 )

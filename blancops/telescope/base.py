@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -41,6 +43,8 @@ class TelescopeProfile:
     site: ObservingSite
     parameters: TelescopeParameters
     constraints: ConstraintSet
+
+    observing_script_writer: Callable[..., Path] | None = None
 
     # ------------------------------------------------------------------ #
     # Convenience constructors                                             #

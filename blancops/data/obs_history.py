@@ -134,10 +134,9 @@ def build_synthetic_obs_history(
         )
     return pd.DataFrame(records, columns=["field_id", "filter", "timestamp"])
 
-
-# Candidate column names across the two supported formats. Schedule CSVs use the
-# agent_* names from io.schedule_io.SCHEDULE_KEYS; live JSONL logs use the bare
-# proposal-row names emitted by live_scheduler.model_runner.
+# XXX will remove this pre-fix dependence after validating new model
+# Candidate column names: schedule CSVs from older runs use agent_* names; current
+# schedule CSVs and live JSONL logs (live_scheduler.model_runner) use the bare names.
 _FIELD_ID_COLS = ("agent_field_id", "field_id")
 _TIMESTAMP_COLS = ("agent_timestamp", "timestamp")
 _FILTER_IDX_COLS = ("agent_filter_idx", "filter_idx")

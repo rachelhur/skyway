@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 from collections import defaultdict
 
 from blancops.survey.profiles import DES, SurveyProfile
-from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, resolve_data_dir
+from blancops.configs.paths import (
+    OfflineRunPaths, RunPaths,
+    feature_cache_dir, field_feature_cache_dir,
+    lookups_dir, resolve_data_dir
+)
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
 from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
@@ -43,7 +47,7 @@ from blancops.rl.agent import filter_first_decode
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.checkpointer import get_checkpoint
 from blancops.rl.offline_runner import OfflineRunner
-from blancops.io.file_io import SCHEDULE_KEYS
+from blancops.io.file_io import read_schedule_csv
 
 from .data_container import (
     DataContainer,
@@ -165,8 +169,8 @@ def build_evaluators(
     )
     runner = OfflineRunner(
         agent=agent, policy=agent.policy, cfg=cfg,
-        lookups=lookups, num_episodes=1, outdir=ms_outdir,
-        save_SISPI=False, save_state_features=True,
+        lookups=lookups, telescope=telescope, outdir=ms_outdir,
+        save_state_features=True,
         save_movie=save_movie, save_mollweide=save_mollweide, plot_bins=plot_bins,
     )
 
@@ -788,7 +792,7 @@ class MultiStepEvaluator(Evaluator):
         dict
             Night key -> local night CSV path (None for an empty night).
         """
-        nights_dir = self.outdir / 'nights'
+        nights_dir = OfflineRunPaths(self.outdir).nights
         return {k: (nights_dir / Path(v).name) if v is not None else None
                 for k, v in manifest.items()}
 
@@ -798,7 +802,7 @@ class MultiStepEvaluator(Evaluator):
         if not (isinstance(episode, dict) and 'manifest' in episode):
             logger.warning("Cached eval_metrics has no night manifest; cannot render movies from CSVs.")
             return
-        self.runner.save_missing_movies(self._local_manifest(episode['manifest']), ep_num=0)
+        self.runner.save_missing_movies(self._local_manifest(episode['manifest']))
 
     def _process_eval_metrics(self, eval_metrics):
         # Deterministic eval: single episode.
@@ -894,15 +898,15 @@ class MultiStepEvaluator(Evaluator):
         # ---- Pass 1: scalars from per-night CSVs ----
         frames = []
         for n in night_keys:
-            df = pd.read_csv(manifest[n])
+            df = read_schedule_csv(manifest[n])
             df['_night_key'] = n
             frames.append(df)
 
         full_df    = pd.concat(frames, ignore_index=True)
-        ts_arr     = full_df[SCHEDULE_KEYS['timestamp']].values
-        bin_arr    = full_df[SCHEDULE_KEYS['bin_id']].values
-        filter_arr = full_df[SCHEDULE_KEYS['filter_idx']].values
-        field_arr  = full_df[SCHEDULE_KEYS['field_id']].values
+        ts_arr     = full_df['timestamp'].values
+        bin_arr    = full_df['bin_id'].values
+        filter_arr = full_df['filter_idx'].values
+        field_arr  = full_df['field_id'].values
         night_col  = full_df['_night_key'].values
         n_rows     = len(ts_arr)
         del frames, full_df
