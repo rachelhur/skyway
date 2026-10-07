@@ -5,7 +5,8 @@ import argparse
 from matplotlib import pyplot as plt
 from blancops.configs import paths
 from blancops.io.logger_utils import configure_logger
-from blancops.rl.evaluations.evaluator import build_evaluators, plot_metric_distributions_with_ss_overlay
+from blancops.rl.evaluations.evaluator import build_evaluators
+from blancops.rl.evaluations import survey_metrics as sm
 from blancops.configs.experiment_schema import load_and_validate
 from blancops.configs.paths import RunPaths
 import logging
@@ -30,6 +31,8 @@ def main():
                         help='Also draw HEALPix bins in movies of field-level models (bin-level models always draw them).')
     parser.add_argument('--split', type=str, default='test', choices=['val', 'test'],
                         help='Which split to evaluate.')
+    parser.add_argument('--baselines', action='store_true',
+                        help='Also run the random and min_slew heuristics in the depth-vs-uniformity figure.')
 
     args = parser.parse_args()
 
@@ -94,6 +97,25 @@ def main():
         ss.run()
         ms.run(overwrite=args.force_overwrite)
 
-        ss_list.append(ss)
-        ms_list.append(ms)
+    # ------------------------------
+    # Depth vs. uniformity against DES
+    # ------------------------------
+    rollouts = {label: sm.policy_rollout(ms) for label, ms in zip(labels, ms_list)}
+    legacy = [label for label, r in rollouts.items() if r is None]
+    if legacy:
+        raise ValueError(f"No manifest-listed night CSVs for {legacy}; rerun them with -f.")
+    lookups = ms_list[0].data.lookups
+    record = sm.load_des_record(sm.resolve_fits_path(cfg_list[0]), sm.evaluated_nights(ms_list[0]))
+    scored, report = sm.score_schedulers(rollouts, record, lookups, heuristics=args.baselines)
+    report.log()
+    table = sm.save_depth_uniformity(scored, report, lookups, {label: label for label in labels}, outdir)
+    for label, root in zip(labels, roots):
+        table.loc[table['key'] == label, 'run_dir'] = str(root)
+    table['split'] = args.split
+    table['action_decoding'] = args.action_decoding
+    table.to_csv(outdir / 'depth_uniformity.csv', index=False)
+    logger.info(f"Wrote {outdir / 'depth_uniformity.png'}")
 
+
+if __name__ == '__main__':
+    main()

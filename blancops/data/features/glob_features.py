@@ -31,6 +31,7 @@ import pandas as pd
 import numpy as np
 import torch
 import ephem
+import astropy.units as u
 from astropy.time import Time
 from tqdm import tqdm
 from datetime import date, datetime, timedelta, timezone
@@ -42,11 +43,11 @@ from blancops.ephemerides import ephemerides
 from blancops.data_quality.sky_brightness import estimate_sky_brightness
 from blancops.data_quality.seeing import Seeing
 from blancops.configs.constants import (
-    BLANCO_LON, IDX2FILTER, ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_WAVELENGTH,
-    FILTER2WAVE, FILTERWAVENORM, FILTER2IDX, ZENITH_FILTER, IDX2WAVE,
-    FWHM_REF_WAVELENGTH, FWHM_REF_FILTER,
+    ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_WAVELENGTH, ZENITH_FILTER,
     ZENITH_AZ, ZENITH_EL, ZENITH_AIRMASS, ZENITH_ZD, ZENITH_HA, ZENITH_OBJECT
 )
+from blancops.survey.profiles import DES, SurveyProfile
+from blancops.telescope.base import TelescopeProfile
 
 import logging
 
@@ -60,21 +61,23 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 
-def compute_global_time_only_features(*, timestamp) -> dict:
+def compute_global_time_only_features(*, timestamp, telescope: TelescopeProfile | None = None) -> dict:
     """Time-only global ephemeris features (no pointing dependence).
 
     Returns a dict with: ``lst``, ``sun_ra``, ``sun_dec``, ``sun_az``,
     ``sun_el``, ``moon_ra``, ``moon_dec``, ``moon_az``, ``moon_el``,
-    ``moon_phase`` — each a scalar at the given timestamp.
+    ``moon_phase``, each a scalar at the given timestamp. ``lst`` uses the
+    telescope site's longitude (default: the DES telescope).
 
     Used by both pipelines: live calls this once per step; offline calls
     it inside its row loop to fill the sun/moon/lst columns.
     """
     features = {}
+    site = (telescope or DES.telescope).site
 
     astro_time = Time(timestamp, format='unix', scale='utc')
     features['lst'] = float(
-        astro_time.sidereal_time('apparent', longitude=BLANCO_LON).radian
+        astro_time.sidereal_time('apparent', longitude=site.lon * u.deg).radian
     )
 
     sun_radec, sun_azel, moon_radec, moon_azel = calc_sun_and_moon_positions(timestamp)
@@ -87,12 +90,12 @@ def compute_global_time_only_features(*, timestamp) -> dict:
     return features
 
 
-def compute_global_pointing_features(timestamp, ra, dec, moon_radec) -> dict:
+def compute_global_pointing_features(timestamp, ra, dec, moon_radec, survey: SurveyProfile = DES) -> dict:
     """Pointing-dependent global ephemeris features.
 
     Returns a dict with: ``az``, ``el`` (clipped to ``[0, π/2]``), ``ha``,
-    ``airmass``, and ``sky_brightness_<filter>`` for each filter in
-    ``FILTER2IDX``.
+    ``airmass``, and ``sky_brightness_<filter>`` for each of the survey's
+    filters.
 
     The elevation clip absorbs the precision issue where ``el`` can be
     slightly negative just before sunrise/sunset and propagate into the
@@ -102,7 +105,7 @@ def compute_global_pointing_features(timestamp, ra, dec, moon_radec) -> dict:
     from FITS measurements (which differ from ephemeris values due to
     atmospheric refraction and pointing error) and uses a vectorized
     sky-brightness pass for batch efficiency, so it does not call this
-    helper.
+    helper. # XXX check this
     """
     features = {}
 
@@ -116,7 +119,7 @@ def compute_global_pointing_features(timestamp, ra, dec, moon_radec) -> dict:
     features['airmass'] = 1.0 / np.cos(np.pi / 2 - el)
     features['moon_distance'] = calc_distance_to_moon(moon_radec, (ra, dec))
 
-    for filt in FILTER2IDX.keys():
+    for filt in survey.filters:
         features[f"sky_brightness_{filt}"] = estimate_sky_brightness(
             time=timestamp, ra=ra, dec=dec, band=filt
         )
@@ -124,7 +127,7 @@ def compute_global_pointing_features(timestamp, ra, dec, moon_radec) -> dict:
     return features
 
 
-def compute_global_mean_tiling_features(running_counts, target_counts) -> dict:
+def compute_global_mean_tiling_features(running_counts, target_counts, survey: SurveyProfile = DES) -> dict:
     """Survey-completion scalars from a running visit-count snapshot.
 
     Computes "what fraction of the survey is done" without referencing
@@ -138,7 +141,7 @@ def compute_global_mean_tiling_features(running_counts, target_counts) -> dict:
       - 'global_mean_tiling': scalar in [0, 1]. Mean of per-(field, filter)
         tiling across all in-plan fields (target > 0). Per-(field,filter) tiling
         is `current / max(current, target)`, naturally capped at 1.
-      - 'global_mean_tiling_{filt}' for each filter in FILTER2IDX: scalar in
+      - 'global_mean_tiling_{filt}' for each of the survey's filters: scalar in
         [0, 1]. Mean of per-field tiling across in-plan fields in
         that filter. Useful when filter strategy shifts late-survey
         (e.g., Y dominating after g/r/i complete).
@@ -146,6 +149,7 @@ def compute_global_mean_tiling_features(running_counts, target_counts) -> dict:
     Args:
         running_counts: (nfields, nfilters) int — visit counts so far.
         target_counts: (nfields, nfilters) int — survey targets, fixed.
+        survey: survey whose filter order indexes axis 1 of the counts.
     """
     features = {}
     in_plan = target_counts > 0
@@ -154,7 +158,7 @@ def compute_global_mean_tiling_features(running_counts, target_counts) -> dict:
         # Defensive: empty lookup. Return zeros for every key the caller
         # might request rather than crashing.
         features['global_mean_tiling'] = 0.0
-        for filt in FILTER2IDX.keys():
+        for filt in survey.filters:
             features[f'global_mean_tiling_{filt}'] = 0.0
         return features
 
@@ -168,7 +172,7 @@ def compute_global_mean_tiling_features(running_counts, target_counts) -> dict:
 
     features['global_mean_tiling'] = float(tiling[in_plan].mean())
 
-    for filt, fidx in FILTER2IDX.items():
+    for filt, fidx in survey.filter2idx.items():
         col_in_plan = in_plan[:, fidx]
         if col_in_plan.any():
             features[f'global_mean_tiling_{filt}'] = float(
@@ -189,7 +193,7 @@ def compute_global_survey_progress_features(tracker, idx2filter=None) -> dict:
     caught by `_validate_feature_config` upstream.
     """
     if idx2filter is None:
-        idx2filter = IDX2FILTER
+        idx2filter = DES.idx2filter
     if not tracker._is_field_filter:
         return {}
     return {
@@ -208,7 +212,7 @@ def compute_global_urgency_features(
     target == 0 (matches the prior live-env behavior).
     """
     if idx2filter is None:
-        idx2filter = IDX2FILTER
+        idx2filter = DES.idx2filter
     if not tracker._is_field_filter:
         return {}
 
@@ -259,6 +263,7 @@ _GLOBAL_TRACKER_FAMILIES = [
         "fn": lambda ctx: compute_global_mean_tiling_features(
             running_counts=ctx["tracker"].raw_counts,
             target_counts=ctx["tracker"].target_counts,
+            survey=ctx.get("survey", DES),
         ),
     },
 ]
@@ -310,6 +315,7 @@ class GlobalFeatureEngineer:
         self.cyclical_features = cyclical_features
         self.do_cyclical_norm = do_cyclical_norm
         self.do_filt = do_filt
+        self.survey = lookups.survey
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
         """Executes the full feature engineering pipeline."""
@@ -341,7 +347,7 @@ class GlobalFeatureEngineer:
         feat_lists = defaultdict(list)
         for t in tqdm(timestamps, total=len(timestamps),
                       desc='Calculating sun/moon/lst ephemeris'):
-            feats = compute_global_time_only_features(timestamp=t)
+            feats = compute_global_time_only_features(timestamp=t, telescope=self.survey.telescope)
             for k, v in feats.items():
                 feat_lists[k].append(v)
 
@@ -385,12 +391,13 @@ class GlobalFeatureEngineer:
         return df
 
     def _add_current_filter(self, df: pd.DataFrame):
-        df['filter_wave'] = df['filter'].map(FILTER2WAVE)
-        df['filter_wave'] = df['filter_wave'].fillna(ZENITH_WAVELENGTH) / FILTERWAVENORM # zenith "filter" set to 0, then normalize
-        df['filter_idx'] = df['filter'].map(FILTER2IDX)
+        wave_norm = self.survey.telescope.parameters.filter_wave_norm
+        df['filter_wave'] = df['filter'].map(self.survey.filter2wave)
+        df['filter_wave'] = df['filter_wave'].fillna(ZENITH_WAVELENGTH) / wave_norm # zenith "filter" set to 0, then normalize
+        df['filter_idx'] = df['filter'].map(self.survey.filter2idx)
         for feat_name in self.base_features:
             if feat_name == 'is_filter':
-                for filt in FILTER2IDX.keys():
+                for filt in self.survey.filters:
                     df[f'{feat_name}_{filt}'] = (df['filter'] == filt).astype(np.float32)
         return df
 
@@ -401,7 +408,7 @@ class GlobalFeatureEngineer:
         much faster than calling it per row in the time-features loop.
         """
         # if any(('sky_brightness' in base_feat) for base_feat in self.base_features):
-        for filt in FILTER2WAVE.keys():
+        for filt in self.survey.filters:
             if filt != ZENITH_FILTER:
                 if any(('sky_brightness' == base_feat) for base_feat in self.base_features):
                     df[f'sky_brightness_{filt}'] = estimate_sky_brightness(
@@ -446,7 +453,7 @@ class GlobalFeatureEngineer:
         out_overall = np.full(len(df), np.nan, dtype=np.float32)
         out_per_filt = {
             f: np.full(len(df), np.nan, dtype=np.float32)
-            for f in FILTER2IDX.keys()
+            for f in self.survey.filters
         }
 
         visit_hist_dict = self.lookups.night2fidfilt_visit_hist
@@ -465,10 +472,10 @@ class GlobalFeatureEngineer:
 
             for j in range(len(group)):
                 mt = compute_global_mean_tiling_features(
-                    running_counts=running, target_counts=target_counts,
+                    running_counts=running, target_counts=target_counts, survey=self.survey,
                 )
                 out_overall[row_idxs[j]] = mt['global_mean_tiling']
-                for f in FILTER2IDX.keys():
+                for f in self.survey.filters:
                     out_per_filt[f][row_idxs[j]] = mt[f'global_mean_tiling_{f}']
 
                 # Increment for next row. Zenith rows (ZENITH_FIELD_ID or
@@ -483,7 +490,7 @@ class GlobalFeatureEngineer:
         # Attach only the columns the user actually requested.
         if 'global_mean_tiling' in self.base_features:
             df['global_mean_tiling'] = out_overall
-        for filt in FILTER2IDX.keys():
+        for filt in self.survey.filters:
             if 'global_mean_tiling' in self.base_features:
                 df[f'global_mean_tiling_{filt}'] = out_per_filt[filt]
 
@@ -738,7 +745,7 @@ def _backfill_zenith_states(df):
     # df['fwhm'] = df.groupby('night')['fwhm'].bfill()
     # df['night_idx'] = df.groupby('night')['night_idx'].bfill()
     # df['t_survey'] = df.groupby('night')['t_survey'].bfill()
-    # for f in FILTER2IDX.keys():
+    # for f in DES.filters:
     #     df[f'raw_survey_progress_{f}'] = df.groupby('night')[f'raw_survey_progress_{f}'].bfill()
     #     df[f'survey_progress_{f}'] = df.groupby('night')[f'survey_progress_{f}'].bfill()
     #     df[f'urgency_{f}'] = df.groupby('night')[f'urgency_{f}'].bfill()
@@ -773,7 +780,7 @@ def calculate_sun_rise_and_set_azel(df):
 
     return rise_azels, set_azels
 
-def compute_causal_fwhm(night_df, seeing_cfg) -> np.ndarray:
+def compute_causal_fwhm(night_df, seeing_cfg, survey: SurveyProfile = DES) -> np.ndarray:
     """Per-row causal predicted FWHM (arcsec) for one night.
 
     Builds a Seeing from seeing_cfg, ingests the night's measured
@@ -791,6 +798,8 @@ def compute_causal_fwhm(night_df, seeing_cfg) -> np.ndarray:
         'el'. Row order is preserved in the output.
     seeing_cfg : SeeingConfig
         Predictor parameters.
+    survey : SurveyProfile
+        Survey whose filter indices the rows use; its seeing reference band is the fallback.
 
     Returns
     -------
@@ -811,10 +820,8 @@ def compute_causal_fwhm(night_df, seeing_cfg) -> np.ndarray:
 
     # Zenith/wait rows carry a NaN filter_idx; fall back to the reference
     # band so int() never sees a NaN (only the airmass term then matters).
-    bands = [
-        FWHM_REF_FILTER if np.isnan(f) else IDX2FILTER.get(int(f), FWHM_REF_FILTER)
-        for f in filt_idx
-    ]
+    idx2filter, ref_band = survey.idx2filter, survey.seeing_ref_filter
+    bands = [ref_band if np.isnan(f) else idx2filter.get(int(f), ref_band) for f in filt_idx]
 
     valid = ~np.isnan(fwhm_meas)
     if valid.any():

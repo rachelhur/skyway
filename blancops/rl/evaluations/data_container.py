@@ -12,7 +12,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from blancops.configs.constants import FILTER2IDX, IDX2FILTER
 from blancops.data.dataset import TransitionDataset
 from blancops.data.features.normalizations import StateNormalizer, inverse_cyclical_norm
 from blancops.data.lookup_tables import LookupTables
@@ -119,20 +118,20 @@ class DataContainer(ABC):
         if not (_has_filter_idx or _has_filter_onehot or _has_filter_name):
             raise ValueError('no filter info found in expert data')
         elif _has_filter_name and not _has_filter_idx:
-            filtered['filter_idx'] = filtered['filter'].map(FILTER2IDX).fillna(-1)
+            filtered['filter_idx'] = filtered['filter'].map(self.lookups.survey.filter2idx).fillna(-1)
         elif not _has_filter_name and _has_filter_idx:
-            filtered['filter'] = filtered['filter_idx'].map(IDX2FILTER).fillna(-1)
+            filtered['filter'] = filtered['filter_idx'].map(self.lookups.survey.idx2filter).fillna(-1)
         elif _has_filter_name and _has_filter_idx:
             pass
         elif not _has_filter_name and not _has_filter_idx:
-            for filt, idx in FILTER2IDX.items():
+            for filt, idx in self.lookups.survey.filter2idx.items():
                 mask = filtered[f'is_filter_{filt}'].astype(bool).values
                 filtered.loc[mask, 'filter_idx'] = idx
                 filtered.loc[mask, 'filter'] = filt
         else:
             raise ValueError('Missing if/else condition -- this should never happen')
         out['filter_idx'] = filtered['filter_idx'].values
-        out['filter'] = out['filter_idx'].map(IDX2FILTER).fillna(-1)
+        out['filter'] = out['filter_idx'].map(self.lookups.survey.idx2filter).fillna(-1)
 
         out['candidate_az'], out['candidate_el'], out['candidate_ra'], out['candidate_dec'] = self._get_candidate_coords(
             out['candidate_idx'].values, timestamps=out['timestamp'].values,
@@ -264,7 +263,7 @@ class DataContainer(ABC):
         df['datetime'] = pd.to_datetime(df['timestamp'].values, unit='s')
         df['candidate_az'], df['candidate_el'], df['candidate_ra'], df['candidate_dec'] = self._get_candidate_coords(candidate_idxs, timestamps)
         df['filter_idx'] = filter_idxs
-        df['filter'] = df['filter_idx'].map(IDX2FILTER)
+        df['filter'] = df['filter_idx'].map(self.lookups.survey.idx2filter)
         df['az'] = df['el'] = df['ra'] = df['dec'] = np.nan
         return df
 

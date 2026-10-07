@@ -23,13 +23,12 @@ from blancops.data.rewards import combine_rewards, normalize_rewards, reward_nor
 from blancops.ephemerides import ephemerides
 from blancops.math import geometry, units
 
-from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, _NUM_FILTERS, FILTER2IDX, ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER
+from blancops.configs.constants import _CYCLICAL_FEATURE_NAMES, ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER
 
 from blancops.data.features.normalizations import StateNormalizer, build_normalizer_kwargs, setup_feature_names
 from blancops.data.splits import NightSplit, resolve_night_split
-from blancops.survey.profiles import DES
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.telescope.base import TelescopeProfile
-from blancops.telescope.registry import get_telescope
 from blancops.configs.enums import grid_is_azel, has_filter, is_field_level
 from blancops.configs.experiment_schema import ActionConstraints
 from blancops.data.features.field_features import FieldGrid, build_field_normalizer, expand_field_feature_names, field_norm_stats
@@ -61,7 +60,7 @@ def _gather_candidate_features(candidate_features, rows, cols):
     return out
 
 
-def _overwrite_fwhm_with_causal(df, seeing_cfg):
+def _overwrite_fwhm_with_causal(df, seeing_cfg, survey: SurveyProfile = DES):
     """Replace the raw measured 'fwhm' column with the causal prediction.
 
     Groups by night and applies compute_causal_fwhm so each row's fwhm is
@@ -76,7 +75,7 @@ def _overwrite_fwhm_with_causal(df, seeing_cfg):
     for _, idx in df.groupby('night', sort=False).groups.items():
         positions = df.index.get_indexer(idx)
         night_df = df.loc[idx]
-        out[positions] = compute_causal_fwhm(night_df, seeing_cfg)
+        out[positions] = compute_causal_fwhm(night_df, seeing_cfg, survey=survey)
     df = df.copy()
     df['fwhm'] = out
     return df
@@ -385,11 +384,16 @@ class TransitionDataset(torch.utils.data.Dataset):
         lookups : LookupTables = None,
         norm_stats: NormStats | None = None,     # None: fit on this dataset's training transitions
         split_role : str | None = None,
-        telescope: TelescopeProfile | None = None
+        telescope: TelescopeProfile | None = None,
+        survey: SurveyProfile = DES,
     ):
         self._given_norm_stats = norm_stats
-        self._telescope = telescope or get_telescope("blanco")
-        norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
+        self._telescope = telescope or survey.telescope
+        self._survey = survey
+        survey.check_telescope(self._telescope)
+        if lookups is not None:
+            survey.check_lookups(lookups)
+        norm_kwargs = build_normalizer_kwargs(cfg.data.norm, survey=survey)
         self._split_role = split_role
         self._setup_configuration(cfg, norm_kwargs)
         self.lookups = lookups
@@ -418,14 +422,14 @@ class TransitionDataset(torch.utils.data.Dataset):
     def _setup_configuration(self, cfg, norm_kwargs):
         self._seeing_cfg = cfg.data.seeing
         self._min_teff = cfg.data.min_teff
-        self._band_threshold = DES.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
+        self._band_threshold = self._survey.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
         self._drop_interrupted_transitions = getattr(cfg.data, 'drop_interrupted', False)
         self.reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
         self._calculate_action_mask = cfg.model.algorithm != 'bc' # expensive and not needed for bc
         self.include_candidate_features = len(cfg.data.bin_features) > 0
 
         action_space = cfg.data.action_space
-        self.num_filters = _NUM_FILTERS if has_filter(action_space) else 1
+        self.num_filters = self._survey.num_filters if has_filter(action_space) else 1
 
         # num_actions resolved after n_candidates is known from cache
         self._action_space_str = action_space
@@ -449,13 +453,14 @@ class TransitionDataset(torch.utils.data.Dataset):
             norm_kwargs['cyclical_feature_names'],
             norm_kwargs['do_cyclical_norm'],
             do_filt=has_filter(action_space),
+            survey=self._survey,
         )
         self.do_local_mean_z_score = any('rel_' in name for name in self.candidate_feature_names)
 
         # field_filter
         self.field_level = is_field_level(action_space)
         if self.field_level:
-            self.candidate_feature_names = expand_field_feature_names(list(cfg.data.field_features))
+            self.candidate_feature_names = expand_field_feature_names(list(cfg.data.field_features), survey=self._survey)
             self.include_candidate_features = True
             self.do_local_mean_z_score = False
             constraints = ActionConstraints()
@@ -488,7 +493,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         self._interruptions = getattr(cache, 'interruptions', None)
 
         if 'fwhm' in self.global_feature_names:
-            self._df = _overwrite_fwhm_with_causal(self._df, self._seeing_cfg)
+            self._df = _overwrite_fwhm_with_causal(self._df, self._seeing_cfg, self._survey)
 
         if self.field_level:
             field_indices = [cache.field_feature_names.index(f) for f in self.candidate_feature_names]
@@ -644,8 +649,8 @@ class TransitionDataset(torch.utils.data.Dataset):
             assert ZENITH_FILTER not in next_state_df['filter'].values, \
                 f"Invalid data: Found '{ZENITH_FILTER}' in next_state_df."
             field_ids = next_state_df['field_id'].to_numpy().astype(np.int64)
-            filter_indices = next_state_df['filter'].map(FILTER2IDX).values.astype(np.int64)
-            return field_ids * _NUM_FILTERS + filter_indices
+            filter_indices = next_state_df['filter'].map(self._survey.filter2idx).values.astype(np.int64)
+            return field_ids * self._survey.num_filters + filter_indices
 
         if self.candidate_grid.is_azel:
             lonlat = next_state_df[['az', 'el']].values
@@ -657,12 +662,12 @@ class TransitionDataset(torch.utils.data.Dataset):
         if 'filter' not in action_space:
             return bin_indices
         elif ('radec' not in action_space) and ('azel' not in action_space):
-            return df.iloc[next_state_idxs]['filter'].map(FILTER2IDX).values.astype(np.int32)
+            return df.iloc[next_state_idxs]['filter'].map(self._survey.filter2idx).values.astype(np.int32)
         else:
             assert ZENITH_FILTER not in next_state_df['filter'].values, \
                 f"Invalid data: Found '{ZENITH_FILTER}' in next_state_df."
-            filter_indices = next_state_df['filter'].map(FILTER2IDX).values.astype(np.int32)
-            return (bin_indices * _NUM_FILTERS) + filter_indices
+            filter_indices = next_state_df['filter'].map(self._survey.filter2idx).values.astype(np.int32)
+            return (bin_indices * self._survey.num_filters) + filter_indices
 
     def _construct_rewards(self, df, next_state_idxs) -> np.ndarray:
         """Unnormalized rewards; scaled later by _normalize_rewards."""
@@ -696,8 +701,7 @@ class TransitionDataset(torch.utils.data.Dataset):
             RewardTerm.UNIFORMITY: lambda: self._uniformity_inputs(df, next_state_idxs),
         }
 
-    @staticmethod
-    def _exposure_field_filter_idxs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _exposure_field_filter_idxs(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Exposure mask and integer field and filter indices per row; non-exposures get index 0.
 
         Parameters
@@ -712,7 +716,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         """
         is_exposure = (df['field_id'] != ZENITH_FIELD_ID).to_numpy()
         field_ids = np.where(is_exposure, df['field_id'].to_numpy(), 0).astype(int)
-        filter_idxs = df['filter'].map(FILTER2IDX).fillna(0).to_numpy().astype(int)
+        filter_idxs = df['filter'].map(self._survey.filter2idx).fillna(0).to_numpy().astype(int)
         return is_exposure, field_ids, filter_idxs
 
     def _teff_accepted_inputs(self, next_df: pd.DataFrame) -> dict:
@@ -888,7 +892,7 @@ class TransitionDataset(torch.utils.data.Dataset):
 
     # def _construct_min_tiling_reward(self, df, next_state_idxs, rw):
     #     field_ids = df.iloc[next_state_idxs]['field_id'].values.astype(int)
-    #     filter_idxs = df.iloc[next_state_idxs]['filter'].map(FILTER2IDX).values.astype(int)
+    #     filter_idxs = df.iloc[next_state_idxs]['filter'].map(self._survey.filter2idx).values.astype(int)
     #     visits_before = df.groupby(['field_id', 'filter']).cumcount().iloc[next_state_idxs].values
     #     target_visits = self.lookups.target_fidfilt_counts[field_ids, filter_idxs]
     #     safe_target = np.where(target_visits > 0, target_visits, 1)
@@ -915,7 +919,7 @@ class TransitionDataset(torch.utils.data.Dataset):
         cache = self._field_cache
         names = cache.field_feature_names
         el_col, ha_col = names.index('el'), names.index('ha')
-        comp_cols = [names.index(f"completion_{f}") for f in FILTER2IDX]
+        comp_cols = [names.index(f"completion_{f}") for f in self._survey.filters]
         dec = self.lookups.fields['dec'].to_numpy()
         rows = np.asarray(state_idxs)
         masks = np.empty((len(rows), self.n_candidates * self.num_filters), dtype=np.bool_)
@@ -1024,10 +1028,10 @@ class TransitionDataset(torch.utils.data.Dataset):
         """Fit feature stats on the training states (or apply the given ones) and set self.norm_stats."""
         fit = self._given_norm_stats is None
         global_normalizer = StateNormalizer(
-            state_feature_names=self.global_feature_names, **norm_kwargs
+            state_feature_names=self.global_feature_names, survey=self._survey, **norm_kwargs
         )
         candidate_normalizer = StateNormalizer(
-            state_feature_names=self.candidate_feature_names, **norm_kwargs
+            state_feature_names=self.candidate_feature_names, survey=self._survey, **norm_kwargs
         )
         if self.field_level:
             candidate_normalizer = build_field_normalizer(self.candidate_feature_names)

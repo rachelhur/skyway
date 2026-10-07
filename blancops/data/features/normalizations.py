@@ -2,17 +2,18 @@ import torch
 import numpy as np
 import logging
 
-from blancops.configs.constants import _FILTER_DEP_FEATURE_NAMES, FILTER2IDX
+from blancops.configs.constants import _FILTER_DEP_FEATURE_NAMES
 from blancops.configs.experiment_schema import NormalizationConfig
 from blancops.configs.enums import has_filter
+from blancops.survey.profiles import DES, SurveyProfile
 
 logger = logging.getLogger(__name__)
 
-def build_normalizer(state_feature_names, cfg):
-    norm_kwargs = build_normalizer_kwargs(cfg.data.norm, has_filter(cfg.data.action_space))
-    return StateNormalizer(state_feature_names=state_feature_names, **norm_kwargs)
+def build_normalizer(state_feature_names, cfg, survey: SurveyProfile = DES):
+    norm_kwargs = build_normalizer_kwargs(cfg.data.norm, has_filter(cfg.data.action_space), survey=survey)
+    return StateNormalizer(state_feature_names=state_feature_names, survey=survey, **norm_kwargs)
 
-def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> dict:
+def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True, survey: SurveyProfile = DES) -> dict:
     """Translates the Pydantic schema into the exact kwargs expected by StateNormalizer."""
     kwargs = {
         'cyclical_feature_names': [],
@@ -36,7 +37,7 @@ def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> d
 
     for feature, requested_norms in norm_config.feature_norm_mappings.items():
         if do_filt and feature in _FILTER_DEP_FEATURE_NAMES:
-            feat_names = [f"{feature}_{filt}" for filt in FILTER2IDX.keys()]
+            feat_names = [f"{feature}_{filt}" for filt in survey.filters]
         else:
             feat_names = [feature]
         for feat_name in feat_names:
@@ -56,14 +57,14 @@ def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> d
 
     return kwargs
 
-def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True):
+def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True, survey: SurveyProfile = DES):
     feature_names_out = []
     for feat_name in feature_names:
         has_filt_dep = do_filt and feat_name in _FILTER_DEP_FEATURE_NAMES
         if do_filt:
             # has_filt_dep = feat_name in _FILTER_DEP_FEATURE_NAMES
             if has_filt_dep:
-                [feature_names_out.append(f"{feat_name}_{filt}") for filt in FILTER2IDX.keys()]
+                [feature_names_out.append(f"{feat_name}_{filt}") for filt in survey.filters]
 
         is_rel_feat = feat_name.startswith('rel_')
         is_delta_feat = feat_name.startswith('delta_')
@@ -79,20 +80,21 @@ def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True):
     return feature_names_out
 
 
-def _base_feature_name(name: str) -> str:
+def _base_feature_name(name: str, survey: SurveyProfile = DES) -> str:
     # Strip filter suffix
-    for filt in FILTER2IDX.keys():
+    for filt in survey.filters:
         if name.endswith(f"_{filt}"):
             name = name[: -(len(filt) + 1)]
             break
     return name
 
 
-def setup_feature_names(base_global_feature_names, base_bin_feature_names, cyclical_feature_names, do_cyclical_norm, do_filt):
+def setup_feature_names(base_global_feature_names, base_bin_feature_names, cyclical_feature_names, do_cyclical_norm, do_filt,
+                        survey: SurveyProfile = DES):
     """Expands feature list to include filter dependence and cyclical normalizations where applicable."""
     if do_cyclical_norm:
-        global_feature_names = expand_feature_set(base_global_feature_names.copy(), cyclical_feature_names, do_filt)
-        bin_feature_names = expand_feature_set(base_bin_feature_names.copy(), cyclical_feature_names, do_filt)
+        global_feature_names = expand_feature_set(base_global_feature_names.copy(), cyclical_feature_names, do_filt, survey)
+        bin_feature_names = expand_feature_set(base_bin_feature_names.copy(), cyclical_feature_names, do_filt, survey)
     else:
         global_feature_names = base_global_feature_names.copy()
         bin_feature_names = base_bin_feature_names.copy()
@@ -188,9 +190,11 @@ class StateNormalizer:
         fix_nans=True,
         do_cyclical_norm=None,
         cyclical_feature_names=None,
-        sentinel_value=-1
+        sentinel_value=-1,
+        survey: SurveyProfile = DES,
     ):
         self.feature_names = state_feature_names
+        self.survey = survey
 
         # Config Flags
         self.do_sin = do_sin_norm
@@ -219,7 +223,7 @@ class StateNormalizer:
         names = self.feature_names
 
         def matches(feat, allowed):
-            return feat in allowed or _base_feature_name(feat) in allowed
+            return feat in allowed or _base_feature_name(feat, self.survey) in allowed
 
         self.masks = {
             'sin': np.array([matches(f, sin_feats) for f in names]),

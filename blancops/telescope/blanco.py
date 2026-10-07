@@ -68,6 +68,9 @@ _PARAMS = TelescopeParameters(
     # Effective wavelength centres (nm): g≈475, r≈638, i≈775, z≈919, Y≈988
     # VR is a wide Vr filter used by programmes like DESGW (gravitational waves).
     filters=("g", "r", "i", "z", "Y", "VR", "N964"),
+    # Wavelengths (nm) used by features and seeing, from obztak seeing.py:
+    # https://github.com/kadrlica/obztak/blob/c28fab23b09bcff1cf46746eae4ec7e40aeb7f7a/obztak/seeing.py#L22
+    filter_wavelengths={"g": 480, "r": 640, "i": 780, "z": 920, "Y": 990},
 )
 
 # ------------------------------------------------------------------ #

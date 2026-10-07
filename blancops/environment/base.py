@@ -21,12 +21,11 @@ import numpy as np
 import gymnasium as gym
 from collections import defaultdict
 from blancops import math
-from blancops.configs.constants import _NUM_FILTERS
 from blancops.configs.enums import RewardTerm
 from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig, RLAlgConfig
 from blancops.data.rewards import combine_rewards, normalize_rewards, uniformity_inputs
 from blancops.data_quality.teff import predict_teff
-from blancops.survey.profiles import DES
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.data.features.bin_features import (
     # Shared per-timestep helpers — single source of truth for bin features.
     _STALENESS_BASE_KEYS,
@@ -53,7 +52,6 @@ from blancops.environment.seeing_model import SeeingModel
 from blancops.math import units
 from blancops.ephemerides import astropy_ephem, ephemerides
 from blancops.telescope.base import TelescopeProfile
-from blancops.telescope.registry import get_telescope
 from blancops.configs.constants import *
 from blancops.configs.enums import grid_is_azel, has_filter, is_field_level
 
@@ -90,39 +88,50 @@ class StateSnapshot:
 #
 # Features not listed here are assumed to be unconditionally computable.
 
-_FILTER_NAMES = list(FILTER2IDX.keys())
-
 # _STALENESS_BIN_REQUIREMENTS = [("attr", "lookups.total_ot_sec")]
 
-_FEATURE_REQUIREMENTS: dict[str, list[tuple[str, str]]] = {
-    "fwhm": [("attr", "_seeing_model")],
-    "t_survey": [("hook", "_get_t_survey")],
-    # Works in both 1D and 2D tracker modes — only attr check.
-    "global_mean_tiling": [("attr", "_survey_progress_tracker")],
-    **{
-        f"survey_progress_{f}": [
-            ("attr", "_survey_progress_tracker"),
-            ("flag", "do_filt"),
-        ]
-        for f in _FILTER_NAMES
-    },
-    **{
-        f"urgency_{f}": [
-            ("attr", "_survey_progress_tracker"),
-            ("flag", "do_filt"),
-            ("hook", "_get_survey_night_idx"),
-            ("hook", "_get_survey_nights_total"),
-        ]
-        for f in _FILTER_NAMES
-    },
-    **{
-        f"global_mean_tiling_{f}": [
-            ("attr", "_survey_progress_tracker"),
-            ("flag", "do_filt"),
-        ]
-        for f in _FILTER_NAMES
-    },
-}
+def _feature_requirements(filters) -> dict[str, list[tuple[str, str]]]:
+    """Requirements of each conditionally computable global feature, with per-filter names for ``filters``.
+
+    Parameters
+    ----------
+    filters : sequence of str
+        Survey filters that suffix the per-filter feature names.
+
+    Returns
+    -------
+    dict
+        Feature name -> list of (kind, target) requirements.
+    """
+    return {
+        "fwhm": [("attr", "_seeing_model")],
+        "t_survey": [("hook", "_get_t_survey")],
+        # Works in both 1D and 2D tracker modes - only attr check.
+        "global_mean_tiling": [("attr", "_survey_progress_tracker")],
+        **{
+            f"survey_progress_{f}": [
+                ("attr", "_survey_progress_tracker"),
+                ("flag", "do_filt"),
+            ]
+            for f in filters
+        },
+        **{
+            f"urgency_{f}": [
+                ("attr", "_survey_progress_tracker"),
+                ("flag", "do_filt"),
+                ("hook", "_get_survey_night_idx"),
+                ("hook", "_get_survey_nights_total"),
+            ]
+            for f in filters
+        },
+        **{
+            f"global_mean_tiling_{f}": [
+                ("attr", "_survey_progress_tracker"),
+                ("flag", "do_filt"),
+            ]
+            for f in filters
+        },
+    }
 
 
 class BaseBlancoEnv(gym.Env, ABC):
@@ -139,6 +148,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         lookups,
         norm_stats: NormStats,
         telescope: TelescopeProfile | None = None,
+        survey: SurveyProfile = DES,
     ):
         super().__init__()
         # Configuration, Normalizations, and Lookups
@@ -154,16 +164,19 @@ class BaseBlancoEnv(gym.Env, ABC):
         # action mask; it is None for alt-az profiles, in which case the check
         # is skipped. ActionConstraints still owns the runtime-mutable airmass /
         # sun limits (see set_constraints).
-        self._telescope = telescope if telescope is not None else get_telescope("blanco")
+        self._telescope = telescope if telescope is not None else survey.telescope
+        self._survey = survey
+        survey.check_telescope(self._telescope)
+        survey.check_lookups(lookups)
 
         # Reward: same terms as the offline dataset, scaled with the training reward stats.
         # _step_record is set by _advance_after_action (None on WAIT).
         self._reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
-        self._band_threshold = DES.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
+        self._band_threshold = survey.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
         self._step_record: dict | None = None
 
         # Feature Configs
-        norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
+        norm_kwargs = build_normalizer_kwargs(cfg.data.norm, survey=survey)
         self.base_global_feature_names = list(cfg.data.global_features)
         self.base_bin_feature_names = list(cfg.data.bin_features)
         self.global_feature_names, self.candidate_feature_names = setup_feature_names(
@@ -171,14 +184,16 @@ class BaseBlancoEnv(gym.Env, ABC):
             self.base_bin_feature_names,
             norm_kwargs['cyclical_feature_names'],
             norm_kwargs['do_cyclical_norm'],
-            do_filt=has_filter(cfg.data.action_space)
+            do_filt=has_filter(cfg.data.action_space),
+            survey=survey,
         )
         self.include_candidate_features = cfg.data.candidate_state_dim > 0
         self.do_filt = has_filter(cfg.data.action_space)
 
         # Normalizers
-        self.global_normalizer = StateNormalizer(state_feature_names=self.global_feature_names, **norm_kwargs)
-        self.candidate_normalizer = StateNormalizer(state_feature_names=self.candidate_feature_names, **norm_kwargs)
+        self.global_normalizer = StateNormalizer(state_feature_names=self.global_feature_names, survey=survey, **norm_kwargs)
+        self.candidate_normalizer = StateNormalizer(state_feature_names=self.candidate_feature_names, survey=survey,
+                                                    **norm_kwargs)
         self.do_cyclical_norm = self.global_normalizer.do_cyclical_norm or self.candidate_normalizer.do_cyclical_norm
 
         self._has_historical_features = any(
@@ -187,8 +202,8 @@ class BaseBlancoEnv(gym.Env, ABC):
             for bf in self.candidate_feature_names
         )
 
-        self.idx2filter = IDX2FILTER
-        self.nfilters = _NUM_FILTERS
+        self.idx2filter = survey.idx2filter
+        self.nfilters = survey.num_filters
 
         # Heapix Grid
         self.hpGrid = ephemerides.HealpixGrid(
@@ -209,7 +224,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         # Replay mode (expert replay checks): accept commands outside the current mask
         self._replay_mode = False
         if self.field_level:
-            self.candidate_feature_names = expand_field_feature_names(list(cfg.data.field_features))
+            self.candidate_feature_names = expand_field_feature_names(list(cfg.data.field_features), survey=survey)
             self.candidate_normalizer = build_field_normalizer(self.candidate_feature_names)
             self._field_grid = FieldGrid(self._ra_arr, self._dec_arr)
 
@@ -712,7 +727,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         """
         if self._seeing_model is None:
             raise ValueError("teff reward requires a seeing model in the environment.")
-        band = IDX2FILTER[s['filter_idx']]
+        band = self.idx2filter[s['filter_idx']]
         ra, dec = self._ra_arr[s['field_id']], self._dec_arr[s['field_id']]
         _, el = ephemerides.equatorial_to_topographic(ra=ra, dec=dec, time=s['t_start'])
         fwhm = self._seeing_model.fwhm(s['t_start'], band=band, el=el) * units.arcsec
@@ -749,7 +764,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         timestamp = self._state_timestamp()
 
         # 1. Time-only ephemeris (gives us LST so we can resolve zenith pointing).
-        new_features = compute_global_time_only_features(timestamp=timestamp)
+        new_features = compute_global_time_only_features(timestamp=timestamp, telescope=self._telescope)
 
         # 2. Resolve pointing RA/Dec. Preserves the original env's zenith branch
         #    (`lst, blanco.lon`) — see the migration notes; this disagrees with
@@ -770,7 +785,8 @@ class BaseBlancoEnv(gym.Env, ABC):
 
         # 3. Pointing-derived ephemeris (az/el/ha/airmass + sky brightness).
         new_features.update(
-            compute_global_pointing_features(timestamp=timestamp, ra=ra, dec=dec, moon_radec=(new_features['moon_ra'], new_features['moon_dec']))
+            compute_global_pointing_features(timestamp=timestamp, ra=ra, dec=dec, moon_radec=(new_features['moon_ra'], new_features['moon_dec']),
+                                             survey=self._survey)
         )
 
         # 4. Filter features. The live env has three cases (zenith / WAIT or
@@ -780,17 +796,18 @@ class BaseBlancoEnv(gym.Env, ABC):
         if self._field_id == ZENITH_FIELD_ID:
             new_features['filter_wave'] = 0.
             new_features['filter_idx'] = ZENITH_FILTER_IDX
-            for filt in FILTER2WAVE.keys():
+            for filt in self._survey.filters:
                 new_features[f'is_filter_{filt}'] = 0
         else:
             if self._bin_num == WAIT_SIGNAL or (not self.do_filt):
                 new_features['filter_wave'] = 0
                 new_features['filter_idx'] = self._filter_idx
             else:
-                new_features['filter_wave'] = IDX2WAVE[self._filter_idx] / FILTERWAVENORM
+                wave_norm = self._telescope.parameters.filter_wave_norm
+                new_features['filter_wave'] = self._survey.idx2wave[self._filter_idx] / wave_norm
                 new_features['filter_idx'] = self._filter_idx
-            filt_str = IDX2FILTER[self._filter_idx]
-            for filt in FILTER2WAVE.keys():
+            filt_str = self.idx2filter[self._filter_idx]
+            for filt in self._survey.filters:
                 new_features[f'is_filter_{filt}'] = filt_str == filt
 
         # 5. Hook-derived features — only populated if their source is available.
@@ -811,6 +828,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         ctx = {
             "tracker": tracker,
             "idx2filter": self.idx2filter,
+            "survey": self._survey,
             # Eagerly resolve the hooks the urgency family needs. Cheap, and
             # keeps `compute_global_tracker_features` free of env coupling.
             # These will be None for envs that don't override the hooks, but
@@ -837,7 +855,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         # if tracker._is_field_filter:
         #     survey_night_idx = self._get_survey_night_idx()
         #     survey_nights_total = self._get_survey_nights_total()
-        #     for filt, idx in FILTER2IDX.items():
+        #     for filt, idx in self._survey.filter2idx.items():
         #         p_name = f"survey_progress_{filt}"
         #         u_name = f"urgency_{filt}"
         #         if p_name in self.global_feature_names:
@@ -937,7 +955,7 @@ class BaseBlancoEnv(gym.Env, ABC):
                 timestamp=ts, pointing_radec=self._current_pointing_radec(), field_grid=self._field_grid,
                 night_duration_sec=self._sunrise_ts - self._sunset_ts, counts=tracker.raw_counts,
                 targets=tracker.target_counts, last_visit_ot=self._last_visit_ot,
-                ot_now=float(self._ot_at_sunset + (ts - self._sunset_ts)),
+                ot_now=float(self._ot_at_sunset + (ts - self._sunset_ts)), survey=self._survey,
             )
             self._field_feature_cache = (key, feats)
         return self._field_feature_cache[1]
@@ -956,7 +974,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         sun_radec = ephemerides.get_source_ra_dec('sun', time=ts)
         _, sun_el = ephemerides.equatorial_to_topographic(sun_radec[0], sun_radec[1], time=ts)
         if sun_el / units.deg > self.sun_el_limit:
-            self._action_mask = np.zeros(self.nfields * _NUM_FILTERS, dtype=bool)
+            self._action_mask = np.zeros(self.nfields * self.nfilters, dtype=bool)
             return self._action_mask
         feats = self._field_features_now()
         visible = self._telescope.visible(
@@ -1042,7 +1060,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         # 4. Relative + cyclical features (in place on the dict).
         el_mask = features['el'] > 0
         apply_relative_bin_features(
-            features, el_mask, self._has_historical_features, self.do_filt
+            features, el_mask, self._has_historical_features, self.do_filt, self._survey
         )
         if self.candidate_normalizer.do_cyclical_norm:
             apply_cyclical_features(
@@ -1162,7 +1180,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         if field_id is None:
             raise ValueError(f"Commanded pointing ({ra}, {dec}) matches no candidate field.")
         filter_idx = int(command['filter'])
-        if not self._replay_mode and not self._action_mask[field_id * _NUM_FILTERS + filter_idx]:
+        if not self._replay_mode and not self._action_mask[field_id * self.nfilters + filter_idx]:
             raise ValueError(f"Field {field_id} in filter {filter_idx} is not observable now.")
         if self.hpGrid.is_azel:
             lon, lat = ephemerides.equatorial_to_topographic(ra=ra, dec=dec, time=self._ts)
@@ -1183,7 +1201,7 @@ class BaseBlancoEnv(gym.Env, ABC):
             self.action_space = gym.spaces.Dict({
                 "pointing": gym.spaces.Box(np.array([0.0, -np.pi / 2]), np.array([2 * np.pi, np.pi / 2]),
                                            dtype=np.float64),
-                "filter": gym.spaces.Discrete(_NUM_FILTERS),
+                "filter": gym.spaces.Discrete(self.nfilters),
                 "wait": gym.spaces.Discrete(2),
             })
             return
@@ -1208,7 +1226,7 @@ class BaseBlancoEnv(gym.Env, ABC):
                 start=min([WAIT_SIGNAL, ZENITH_FIELD_ID]),
             ),
             "filter_idx": gym.spaces.Discrete(
-                _NUM_FILTERS - smallest_sentinel,
+                self.nfilters - smallest_sentinel,
                 start=min([WAIT_SIGNAL, ZENITH_FILTER_IDX]),
             ),
         })
@@ -1235,7 +1253,7 @@ class BaseBlancoEnv(gym.Env, ABC):
 
             if self.do_filt:
                 self._action_mask = np.zeros(
-                    shape=(self.nbins * _NUM_FILTERS,), dtype=bool
+                    shape=(self.nbins * self.nfilters,), dtype=bool
                 )
             else:
                 self._action_mask = np.zeros(shape=self.nbins, dtype=bool)
@@ -1275,7 +1293,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         clean_bins = np.array(valid_field_bins)[valid_bin_mask].astype(int)
 
         if self.do_filt:
-            action_mask = np.zeros(shape=(self.nbins, _NUM_FILTERS), dtype=bool)
+            action_mask = np.zeros(shape=(self.nbins, self.nfilters), dtype=bool)
             clean_ff = sel_valid[sel_valid_fields][valid_bin_mask]
             np.logical_or.at(action_mask, clean_bins, clean_ff)
             action_mask = action_mask.flatten()
@@ -1341,7 +1359,7 @@ class BaseBlancoEnv(gym.Env, ABC):
 
         Concrete subclasses MUST call this as the last line of
         __init__. Three kinds of check, dispatched off
-        `_FEATURE_REQUIREMENTS`:
+        `_feature_requirements(self._survey.filters)`:
 
           * ('hook', name) — type(self) overrides the named method
           * ('attr', name) — getattr(self, name) is not None
@@ -1350,8 +1368,9 @@ class BaseBlancoEnv(gym.Env, ABC):
         cls = type(self)
         issues: list[str] = []
 
+        requirements = _feature_requirements(self._survey.filters)
         for feat in self.global_feature_names:
-            for kind, target in _FEATURE_REQUIREMENTS.get(feat, []):
+            for kind, target in requirements.get(feat, []):
                 if kind == "hook":
                     if not self._is_hook_overridden(target):
                         issues.append(

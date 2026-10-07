@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 from collections import defaultdict
 
-from blancops.configs.constants import FILTER2IDX, _NUM_FILTERS
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, resolve_data_dir
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
@@ -43,7 +43,6 @@ from blancops.rl.agent import filter_first_decode
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.checkpointer import get_checkpoint
 from blancops.rl.offline_runner import OfflineRunner
-from blancops.telescope import get_telescope
 from blancops.io.file_io import SCHEDULE_KEYS
 
 from .data_container import (
@@ -70,6 +69,7 @@ def build_evaluators(
     data_dir=None,
     action_decoding='joint',
     split: str = 'val',
+    survey: SurveyProfile = DES,
 ) -> Tuple['SingleStepEvaluator', 'MultiStepEvaluator']:
     """Build SS and MS evaluators for one split from a config.
 
@@ -85,6 +85,7 @@ def build_evaluators(
         data_dir: Override for the feature cache root.
         action_decoding: 'joint' or 'filter_first'.
         split: Which split to evaluate, 'val' or 'test'.
+        survey: Survey the lookups, dataset and environment are built for.
 
     Returns:
         The single-step and multi-step evaluators.
@@ -107,7 +108,7 @@ def build_evaluators(
     checkpoint = get_checkpoint(outdir, device=device)
     norm_stats = NormStats.from_dict(checkpoint['norm_stats'])
 
-    telescope = get_telescope("blanco")
+    telescope = survey.telescope
 
     # Load val dataset from cache or reconstruct from feature cache
     _data_dir = resolve_data_dir(data_dir if data_dir is not None else cfg.data.data_dir)
@@ -143,14 +144,14 @@ def build_evaluators(
         val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
             cache=val_raw_cache, cfg=cfg, lookups=lookups,
-            norm_stats=norm_stats, split_role=split, telescope=telescope,
+            norm_stats=norm_stats, split_role=split, telescope=telescope, survey=survey,
         )
         TransitionDatasetCache.from_transition_dataset(val_dataset, split=split).save(val_cache_path)
 
     # Build with the dataset's expanded names so filter-dependent features
     # (sky_brightness_g, urgency_r, ...) appear in active_features and can be inverted.
     global_normalizer = build_normalizer(
-        state_feature_names=val_dataset.global_feature_names, cfg=cfg,
+        state_feature_names=val_dataset.global_feature_names, cfg=cfg, survey=survey,
     )
 
     # Agent + runner
@@ -185,7 +186,7 @@ def build_evaluators(
     env = HistoricBlancoEnv(
         cfg=cfg, constraints_cfg=ActionConstraints(), lookups=lookups,
         global_pd_nightgroup=nightgroup, night_start_candidate_states=night_start_candidate_states,
-        norm_stats=norm_stats, telescope=telescope, zenith_start=field_level,
+        norm_stats=norm_stats, telescope=telescope, survey=survey, zenith_start=field_level,
     )
 
     # Containers + plotters + evaluators
@@ -196,8 +197,8 @@ def build_evaluators(
     ms_data = MultiStepDataContainer(val_dataset, action_space, lookups, norm_stats=norm_stats,
                                      global_normalizer=global_normalizer)
 
-    ss_plotter = EvaluationPlotter(ss_outdir, style=style)
-    ms_plotter = EvaluationPlotter(ms_outdir, style=style)
+    ss_plotter = EvaluationPlotter(ss_outdir, style=style, survey=survey)
+    ms_plotter = EvaluationPlotter(ms_outdir, style=style, survey=survey)
 
     # Precompute per-sample visible-bin masks for filter_first single-step
     # decoding, aligned to the SS timestamps used for field placement.
@@ -359,7 +360,7 @@ class Evaluator(ABC):
             Dict mapping filter name to the figure drawn for that filter.
         """
         figs = {}
-        for filt in FILTER2IDX.keys():
+        for filt in self.data.lookups.survey.filters:
             exp_f_mask = self.data.expert_df['filter'].values == filt
             agent_f_mask = self.data.agent_df['filter'].values == filt
             fig, _ = self.plotter.plot_2dhist(
@@ -523,6 +524,7 @@ class SingleStepEvaluator(Evaluator):
         ff_filter_outputs = []
 
         dataset = self.data.dataset
+        num_filters = self.data.lookups.survey.num_filters
 
         do_filter = has_filter(self.data.action_space)
         field_level = is_field_level(self.data.action_space)
@@ -542,7 +544,7 @@ class SingleStepEvaluator(Evaluator):
                     visible = torch.as_tensor(
                         self.visible_bin_masks[sl], device=self.device, dtype=torch.bool
                     )
-                    b_idx, f_idx = filter_first_decode(scores, masks, visible, _NUM_FILTERS)
+                    b_idx, f_idx = filter_first_decode(scores, masks, visible, num_filters)
                     ff_bin_outputs.append(b_idx.cpu())
                     ff_filter_outputs.append(f_idx.cpu())
                 else:
@@ -556,8 +558,8 @@ class SingleStepEvaluator(Evaluator):
         else:
             cand_idxs = torch.cat(action_outputs).cpu().detach().numpy()
             if do_filter:
-                filter_idxs = cand_idxs % _NUM_FILTERS
-                cand_idxs   = cand_idxs // _NUM_FILTERS
+                filter_idxs = cand_idxs % num_filters
+                cand_idxs   = cand_idxs // num_filters
             else:
                 filter_idxs = None
 
@@ -707,15 +709,16 @@ class SingleStepEvaluator(Evaluator):
 
 
     def calculate_filter_confusion(self) -> np.ndarray:
-        n = len(FILTER2IDX)
+        filter2idx = self.data.lookups.survey.filter2idx
+        n = len(filter2idx)
         conf_mat = np.zeros((n, n))
-        for filt, idx in FILTER2IDX.items():
+        for filt, idx in filter2idx.items():
             mask = self.data.expert_df['filter_idx'].values == idx
             ag = self.data.agent_df['filter'].values[mask]
             total = mask.sum()
             if total == 0:
                 continue
-            for _fname, _fidx in FILTER2IDX.items():
+            for _fname, _fidx in filter2idx.items():
                 conf_mat[idx, _fidx] = (ag == _fname).sum() / total
         return conf_mat
 

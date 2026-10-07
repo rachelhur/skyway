@@ -180,14 +180,14 @@ class BinFeatureCache:
 
         # Collect expanded global feature names (post cyclical expansion)
         global_feature_names = expand_feature_set(
-            _GLOBAL_FEATURES, _CYCLICAL_FEATURE_NAMES, do_filt=True
+            _GLOBAL_FEATURES, _CYCLICAL_FEATURE_NAMES, do_filt=True, survey=lookups.survey
         )
         # Keep only columns that actually exist in the enriched df
         global_feature_names = [f for f in global_feature_names if f in enriched_df.columns]
 
         # Expand bin feature names the same way dataset.py does via setup_feature_names
         bin_feature_names = expand_feature_set(
-            list(_BIN_FEATURES), _CYCLICAL_FEATURE_NAMES, do_filt=True
+            list(_BIN_FEATURES), _CYCLICAL_FEATURE_NAMES, do_filt=True, survey=lookups.survey
         )
 
         logger.info("Running BinFeatureEngineer on all bin features…")
@@ -534,7 +534,8 @@ class FieldFeatureCache:
             cyclical_features=_CYCLICAL_FEATURE_NAMES, do_cyclical_norm=True, do_filt=True,
         )
         global_df = glob_eng.transform(df)
-        global_feature_names = [f for f in expand_feature_set(_GLOBAL_FEATURES, _CYCLICAL_FEATURE_NAMES, do_filt=True)
+        global_feature_names = [f for f in expand_feature_set(_GLOBAL_FEATURES, _CYCLICAL_FEATURE_NAMES, do_filt=True,
+                                                             survey=lookups.survey)
                                 if f in global_df.columns]
 
         eng = FieldFeatureEngineer(lookups, base_features)

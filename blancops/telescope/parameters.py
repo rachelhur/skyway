@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -76,6 +76,8 @@ class TelescopeParameters:
     # Filter complement                                                    #
     # ------------------------------------------------------------------ #
     filters: tuple[str, ...]    # ordered tuple of available filter names
+    filter_wavelengths: dict[str, float] = field(default_factory=dict)  # nm, per installed filter a survey uses
+    filter_wave_norm: float = 1000.0  # nm, divisor that scales wavelengths into features
 
     # ------------------------------------------------------------------ #
     # Filter change                                                        #

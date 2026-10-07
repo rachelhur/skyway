@@ -27,9 +27,8 @@ from blancops.environment.seeing_model import PredictiveSeeingModel
 from blancops.environment.survey_tracker import SurveyProgressTracker
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.ephemerides import ephemerides
-from blancops.configs.constants import (
-    WAIT_SIGNAL, ZENITH_FILTER_IDX, FILTER2IDX, IDX2FILTER, FWHM_REF_FILTER,
-)
+from blancops.configs.constants import WAIT_SIGNAL, ZENITH_FILTER_IDX
+from blancops.survey.profiles import DES
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,8 @@ class LiveBlancoEnv(BaseBlancoEnv):
         telemetry_init,
         survey_night_idx=0,
         telescope=None,
-        seeing_window=None
+        seeing_window=None,
+        survey=DES,
     ):
         self._survey_night_idx = survey_night_idx
 
@@ -66,6 +66,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
             lookups=lookups,
             norm_stats=norm_stats,
             telescope=telescope,
+            survey=survey,
         )
         self._build_priority_mask()
         # airmass_limit and sun_el_limit are stored on self by base.
@@ -104,7 +105,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
         """
         if telemetry is not None:
             filter_idx = telemetry.get(
-                "filter_idx", FILTER2IDX.get(telemetry.get("filter"), ZENITH_FILTER_IDX)
+                "filter_idx", self._survey.filter2idx.get(telemetry.get("filter"), ZENITH_FILTER_IDX)
             )
             snap = StateSnapshot(
                 timestamp=telemetry["timestamp"],
@@ -133,7 +134,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
         ``sync_telemetry`` from real hardware telemetry.
         """
         field_id = int(obs_row["field_id"])
-        filter_idx = int(FILTER2IDX[obs_row["filter"]])
+        filter_idx = int(self._survey.filter2idx[obs_row["filter"]])
         self._step_record = dict(field_id=field_id, filter_idx=filter_idx, t_start=float(self._ts))
         self._record_visit(field_id=field_id, filter_idx=filter_idx)
         self._field_id = field_id
@@ -185,6 +186,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
             self._last_visit_ot.shape, np.nan, dtype=self._last_visit_ot.dtype
         )
 
+        filter2idx = self._survey.filter2idx
         for row in completed_obs.itertuples(index=False):
             field_id = int(row.field_id)
             if not 0 <= field_id < self.nfields:
@@ -195,7 +197,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
                 continue
             ot = float(self._ot_at_sunset + (int(row.timestamp) - self._sunset_ts))
             if self.do_filt:
-                filter_idx = int(FILTER2IDX[row.filter])
+                filter_idx = int(filter2idx[row.filter])
                 counts[field_id, filter_idx] += 1
                 prev = last_visit_ot[field_id, filter_idx]
                 if np.isnan(prev) or ot > prev:

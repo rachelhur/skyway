@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from blancops.configs.enums import AcceptanceRule, LookupKeys
-from blancops.configs.constants import FILTER2IDX
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.math import units
 
@@ -38,7 +38,7 @@ def _calc_total_survey_ot(observing_nights, sun_el_limit=-10, per_night_overshoo
 class LookupTables:
     """Universal container for telescope/survey metadata.
 
-    **Shape contract: `*_fidfilt_*` are of shape `(len(fields), len(FILTER2IDX))`,
+    **Shape contract: `*_fidfilt_*` are of shape `(len(fields), survey.num_filters)`,
         indexed by `field_id` along axis 0 and `filter_idx` along axis 1.
         The `fields` index must be `0..N-1` contiguous so array index and `field_id` coincide;
         `__post_init__` enforces this.
@@ -61,6 +61,9 @@ class LookupTables:
 
     # Optional historical counts
     historic_df: Optional[pd.DataFrame] = None
+
+    # Survey whose filter order indexes axis 1 of the `*_fidfilt_*` arrays
+    survey: SurveyProfile = DES
 
     # Total survey time (past and future)
 
@@ -204,16 +207,16 @@ class LookupTables:
         return df
 
     @staticmethod
-    def _build_target_count_lookup(df):
-        filter_order = list(FILTER2IDX.keys())
+    def _build_target_count_lookup(df, survey: SurveyProfile = DES):
+        filter_order = list(survey.filters)
         pivot_df = df.pivot(index='field_id', columns='filter', values='count')
         pivot_df = pivot_df.fillna(0).astype(int)
         counts_matrix = pivot_df.reindex(columns=filter_order, fill_value=0).to_numpy()
         return counts_matrix
 
     @staticmethod
-    def _build_exptime_lookup(df):
-        filter_order = list(FILTER2IDX.keys())
+    def _build_exptime_lookup(df, survey: SurveyProfile = DES):
+        filter_order = list(survey.filters)
         pivot_df = df.pivot(index='field_id', columns='filter', values='exptime')
         pivot_df = pivot_df.fillna(0).astype(int)
         exptime_matrix = pivot_df.reindex(columns=filter_order, fill_value=0).to_numpy()
@@ -317,6 +320,7 @@ class LookupTables:
         fields_path: Optional[str | Path] = None,
         outdir: Optional[Path] = None,
         write_to_disk: bool = False,
+        survey: SurveyProfile = DES,
     ) -> "LookupTables":
         """Build a LookupTables from a JSON fields file."""
         # Data and arg checks -------------------------------------------------
@@ -365,7 +369,7 @@ class LookupTables:
             df = cls._get_contiguous_field_ids(df)
 
         # Filter idx
-        df["filter_idx"] = df["filter"].map(FILTER2IDX).fillna(-1).astype(int)
+        df["filter_idx"] = df["filter"].map(survey.filter2idx).fillna(-1).astype(int)
         if (df["filter_idx"] == -1).any():
             bad = df.loc[df["filter_idx"] == -1, "filter"].unique()
             raise ValueError(f"Unknown filter(s): {list(bad)}")
@@ -399,8 +403,8 @@ class LookupTables:
         )
         cls._validate_field_names(fields_lookup)
 
-        target_fidfilt_counts = cls._build_target_count_lookup(df)
-        fidfilt_exptime = cls._build_exptime_lookup(df)
+        target_fidfilt_counts = cls._build_target_count_lookup(df, survey)
+        fidfilt_exptime = cls._build_exptime_lookup(df, survey)
 
         if outdir is not None:
             resolved_dir = Path(outdir).resolve()
@@ -414,6 +418,7 @@ class LookupTables:
             target_fidfilt_counts=target_fidfilt_counts,
             fidfilt_exptime=fidfilt_exptime,
             dir=resolved_dir,
+            survey=survey,
         )
 
         if write_to_disk:
@@ -454,10 +459,10 @@ class LookupTables:
                 f"target_fidfilt_counts has {nfields} rows but `fields` has "
                 f"{len(self.fields)}"
             )
-        if nfilters != len(FILTER2IDX):
+        if nfilters != self.survey.num_filters:
             raise ValueError(
                 f"target_fidfilt_counts has {nfilters} filter columns but "
-                f"FILTER2IDX defines {len(FILTER2IDX)}"
+                f"survey '{self.survey.key}' defines {self.survey.num_filters}"
             )
         if self.fidfilt_exptime.shape != self.target_fidfilt_counts.shape:
             raise ValueError(
@@ -653,7 +658,7 @@ class TrainLookupTables(LookupTables):
         kwargs = self._get_merge_base_kwargs(new_lookups, new_dir)
 
         num_new_fields = len(new_lookups.fields)
-        nfilters = len(FILTER2IDX)
+        nfilters = self.survey.num_filters
 
         def _pad_1d(hist_dict, pad_val=0):
             if hist_dict is None: return None

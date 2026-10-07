@@ -25,7 +25,6 @@ from blancops.io.logger_utils import configure_logger
 from blancops.configs.constants import _FIELD_FEATURES
 from blancops.configs.experiment_schema import ActionConstraints
 from blancops.data.features.field_features import label_mask_report
-from blancops.telescope.registry import get_telescope
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +84,8 @@ def compute_field_cache(outdir: Path, df, lookups, interruptions) -> None:
     constraints = ActionConstraints()
     report = label_mask_report(
         cache.global_df, cache.current_state_idxs, cache.next_state_idxs, cache.field_features,
-        cache.field_feature_names, lookups.fields['dec'].to_numpy(), get_telescope('blanco'),
-        min(constraints.airmass_limit, constraints.airmass_failsafe),
+        cache.field_feature_names, lookups.fields['dec'].to_numpy(), lookups.survey.telescope,
+        min(constraints.airmass_limit, constraints.airmass_failsafe), survey=lookups.survey,
     )
     logger.info(f"Expert labels outside their own field-level mask: {report}")
 

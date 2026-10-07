@@ -17,7 +17,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from blancops.configs.constants import FILTER2IDX
 from blancops.math import geometry, units
 
 class PolicyBase(nn.Module, ABC):

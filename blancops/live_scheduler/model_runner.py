@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from abc import ABC, abstractmethod
-from blancops.configs.constants import IDX2FILTER, WAIT_SIGNAL
+from blancops.configs.constants import WAIT_SIGNAL
 from blancops.configs.experiment_schema import ActionConstraints
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.environment.live_env import LiveBlancoEnv
@@ -338,7 +338,7 @@ class AIModelRunner(ModelRunner):
         tel.setdefault('timestamp', ts)
         if tel.get('last_exposure', None) is not None:
             filt = tel['last_exposure'].get('filter')
-            tel['filter'] = filt if filt in IDX2FILTER.values() else 'g'
+            tel['filter'] = filt if filt in self.lookups.survey.filters else 'g'
 
         return tel
 
@@ -369,7 +369,7 @@ class AIModelRunner(ModelRunner):
             if bin_idx == WAIT_SIGNAL:
                 logger.info("[AIModelRunner] No observable field; ending the proposal chunk.")
                 break
-            filter = IDX2FILTER[filter_idx]
+            filter = self.lookups.survey.idx2filter[filter_idx]
             actions = self.agent.command_to_env_action(bin_idx, filter_idx, field_id)
 
             proposed_schedule['bin_idx'].append(bin_idx)

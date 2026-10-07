@@ -81,7 +81,7 @@ class OfflineRunner:
         df = df[real_mask].copy()
         if df.empty:
             return None
-        df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter_idx']].map(IDX2FILTER)
+        df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter_idx']].map(self.lookups.survey.idx2filter)
         path = self._nights_dir / f'ep-{ep_num}_{night_key}.csv'
         df.to_csv(path, index=False)
         return path
@@ -257,7 +257,7 @@ class OfflineRunner:
             logger.info(
                 f"[moonset q-dump] ts={t} moon el {self._prev_moon_el:.4f}->{moon_el:.4f} rad"
             )
-            dump_filter_q_breakdown(self.policy, obs, info, IDX2FILTER)
+            dump_filter_q_breakdown(self.policy, obs, info, self.lookups.survey.idx2filter)
             self._moonset_dumped = True
         self._prev_moon_el = moon_el
 

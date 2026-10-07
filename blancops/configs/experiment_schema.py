@@ -12,7 +12,6 @@ from typing import Optional
 from blancops.configs.enums import *
 from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, _BIN_FEATURES, _FIELD_FEATURES
 from blancops.configs.paths import RunPaths, workspace
-from blancops.configs.constants import FILTER2IDX
 from blancops.configs.constants import _ALLOWED_NORMS_PER_FEATURE, _NORM_TYPES
 from blancops.survey.profiles import DES
 from blancops.data.splits import NightSplit
@@ -180,7 +179,7 @@ class TrainDataConfig(BaseDataConfig):
     years: List[int] = [2013, 2014, 2015, 2016, 2017, 2018, 2019] # full set of data
     months: List[int] = [i+1 for i in range(12)]
     days: List[int] = [i+1 for i in range(31)]
-    filters: List[str] = [filt for filt in FILTER2IDX.keys()]
+    filters: List[str] = Field(default_factory=lambda: list(DES.filters))
 
     # Split specification: each of val and test is either an explicit night
     # list or a fraction of the total night count. Explicit lists win.

@@ -11,7 +11,7 @@ from blancops.environment.offline_base import BaseBlancoOfflineEnv
 from blancops.environment.field_mask_schedule import resolve_positional_mask
 from blancops.data.features.glob_features import calc_twilight, get_night_boundaries
 from blancops.environment.seeing_model import ConstantSeeingModel, PredictiveSeeingModel
-from blancops.configs.constants import FWHM_REF_FILTER
+from blancops.survey.profiles import DES
 from blancops.ephemerides.time_utils import unix_to_datetime
 
 import logging
@@ -48,6 +48,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
         seeing_trajectory=None,
         field_mask_schedule=None,
         telescope=None,
+        survey=DES,
     ):
         # Parse before super so max_nights is known in time.
         self._night_info = self._parse_night_strs(observing_night_strs)
@@ -62,6 +63,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
             lookups=lookups,
             norm_stats=norm_stats,
             telescope=telescope,
+            survey=survey,
             max_nights=len(self._night_info),
         )
         self._initial_counts = initial_counts
@@ -107,7 +109,7 @@ class OfflineBlancoEnv(BaseBlancoOfflineEnv):
                 self._seeing_model = PredictiveSeeingModel(self.cfg.data.seeing)
         elif initial_fwhm is not None:
             self._seeing_model = ConstantSeeingModel(
-                zenith_seeing=float(initial_fwhm), ref_band=FWHM_REF_FILTER,
+                zenith_seeing=float(initial_fwhm), ref_band=self._survey.seeing_ref_filter,
             )
 
         # Cache prevents double-advancement if _get_night_config

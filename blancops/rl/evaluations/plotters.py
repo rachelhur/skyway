@@ -20,7 +20,7 @@ import numpy as np
 import seaborn as sns
 from matplotlib.patches import Patch
 
-from blancops.configs.constants import FILTER2IDX
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.plotting.plotting import plot_schedule_whole
 from blancops.rl.evaluations.data_container import _ANGLE_TOKENS
 
@@ -63,8 +63,9 @@ def _wrap_if_ra(feature_name: Optional[str], arr):
 
 
 class EvaluationPlotter:
-    def __init__(self, outdir, style: Optional[PlotStyle] = None):
+    def __init__(self, outdir, style: Optional[PlotStyle] = None, survey: SurveyProfile = DES):
         self.outdir = Path(outdir)
+        self.filters = list(survey.filters)
         self.style = style or PlotStyle()
 
     # ------------------------------------------------------------------
@@ -350,8 +351,8 @@ class EvaluationPlotter:
                     annot=True,
                     fmt=".2f",           # Limits annotations to 2 decimal places
                     cmap=self.style.agent_cmap,
-                    xticklabels=FILTER2IDX.keys(),
-                    yticklabels=FILTER2IDX.keys(),
+                    xticklabels=self.filters,
+                    yticklabels=self.filters,
                     ax=ax,
                     square=True,         # Forces cells to be perfectly square
                     cbar_kws={'label': 'Fraction of Observations'}, # Adds context to the colorbar
@@ -385,7 +386,7 @@ class EvaluationPlotter:
         if use_candidate:
             error_key = 'candidate_' + error_key
         if per_filter:
-            for i, filt in enumerate(FILTER2IDX.keys()):
+            for i, filt in enumerate(self.filters):
                 mask = (expert_df['filter'] == filt).values
                 sorted_errors = np.sort(errors_df[error_key][mask])
                 if len(sorted_errors) == 0:
@@ -429,7 +430,7 @@ class EvaluationPlotter:
         nrows, ncols = 2, 3
         fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
         axes = axes.flatten()
-        for ax, filt in zip(axes, FILTER2IDX.keys()):
+        for ax, filt in zip(axes, self.filters):
             exp_m = expert_filters == filt
             ag_m  = agent_filters  == filt
             ax.hist(agent_feature_arr[ag_m],  bins=bins, density=density,
@@ -443,7 +444,7 @@ class EvaluationPlotter:
             ax.set_xlabel(feature_name)
             ax.legend()
         # Hide any unused subplots (only 5 filters but a 2x3 grid).
-        for ax in axes[len(FILTER2IDX):]:
+        for ax in axes[len(self.filters):]:
             ax.set_visible(False)
         fig.tight_layout()
         return fig, axes

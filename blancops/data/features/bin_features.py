@@ -42,7 +42,7 @@ from blancops.configs.constants import *
 
 import logging
 
-from blancops.survey.profiles import DES
+from blancops.survey.profiles import DES, SurveyProfile
 logger = logging.getLogger(__name__)
 
 
@@ -100,7 +100,7 @@ def compute_bin_progress_features(
     nbins: total number of bins on the hpGrid.
     do_filt: True iff filter is part of the action space; controls whether
         per-filter outputs are produced.
-    idx2filter: filter idx -> name mapping. Defaults to ``IDX2FILTER``.
+    idx2filter: filter idx -> name mapping. Defaults to the DES survey's.
     timestamp:
     last_visit_timestamps:
     t_since_last_visit_divisor:
@@ -121,7 +121,7 @@ def compute_bin_progress_features(
         t_since_last_visit_divisor = 1
 
     if idx2filter is None:
-        idx2filter = IDX2FILTER
+        idx2filter = DES.idx2filter
 
     if do_filt and current_counts.ndim != 2:
         raise ValueError(
@@ -277,7 +277,7 @@ def compute_bin_progress_features(
     return features
 
 
-def apply_relative_bin_features(features, el_mask, has_historical, do_filt):
+def apply_relative_bin_features(features, el_mask, has_historical, do_filt, survey: SurveyProfile = DES):
     """Add ``rel_*`` features in place. Works on ``(nbins,)`` or batched
     ``(..., nbins)`` arrays — the relative subtraction operates on the
     trailing axis via ``np.nanmean``.
@@ -295,7 +295,7 @@ def apply_relative_bin_features(features, el_mask, has_historical, do_filt):
 
     if do_filt:
         base_keys = _SURVEY_PROGRESS_BASE_KEYS + _STALENESS_BASE_KEYS
-        keys = [f"{bk}_{filt}" for bk in base_keys for filt in FILTER2IDX.keys()]
+        keys = [f"{bk}_{filt}" for bk in base_keys for filt in survey.filters]
     else:
         keys = _SURVEY_PROGRESS_BASE_KEYS + _STALENESS_BASE_KEYS
     for k in keys:
@@ -316,7 +316,7 @@ def validate_history_bin_features(features, do_filt, idx2filter=None):
     Works on ``(nbins,)`` or batched ``(n_timestamps, nbins)`` arrays.
     """
     if idx2filter is None:
-        idx2filter = IDX2FILTER
+        idx2filter = DES.idx2filter
 
     check_groups = [{
         'unv': 'num_unvisited_fields',
@@ -474,6 +474,7 @@ class BinFeatureEngineer:
         self.cyclical_features = cyclical_features
         self.action_space = action_space
         self.lookups = lookups
+        self.survey = lookups.survey
         self.do_cyclical_norm = do_cyclical_norm
         self.do_local_mean_z_score = do_local_mean_z_score
         self.do_filt = 'filter' in action_space
@@ -513,7 +514,7 @@ class BinFeatureEngineer:
 
         if self.do_local_mean_z_score:
             apply_relative_bin_features(
-                features, el_mask, self.has_historical, self.do_filt
+                features, el_mask, self.has_historical, self.do_filt, self.survey
             )
 
         if self.do_cyclical_norm:
@@ -522,7 +523,7 @@ class BinFeatureEngineer:
             )
 
         if self.has_historical:
-            validate_history_bin_features(features, self.do_filt)
+            validate_history_bin_features(features, self.do_filt, self.survey.idx2filter)
 
         # NOTE: internal NaN -> external sentinel conversion happens in the
         # StateNormalizer pipeline (so the sentinel mask can be saved for
@@ -552,7 +553,7 @@ class BinFeatureEngineer:
             for bk in _SURVEY_PROGRESS_BASE_KEYS + _STALENESS_BASE_KEYS:
                 features[bk] = np.full(shape, np.nan, dtype=np.float32)
                 if self.do_filt:
-                    for filt in FILTER2IDX.keys():
+                    for filt in self.survey.filters:
                         features[f"{bk}_{filt}"] = np.full(
                             shape, np.nan, dtype=np.float32
                         )
@@ -600,7 +601,7 @@ class BinFeatureEngineer:
         # Map filter strings to indices once for the whole frame; we then
         # index per-group inside the loop.
         filt_idx_full = (
-            pt_df['filter'].map(FILTER2IDX)
+            pt_df['filter'].map(self.survey.filter2idx)
             .fillna(ZENITH_FILTER_IDX).astype(np.int32)
             .to_numpy()
         )
@@ -722,6 +723,7 @@ class BinFeatureEngineer:
                         target_counts=self.lookups.target_fidfilt_counts,
                         bins_per_field=bpf, v_mask=vm,
                         nbins=nbins, do_filt=True,
+                        idx2filter=self.survey.idx2filter,
                         timestamp=obs_t,
                         last_visit_timestamps=last_visit_ot,
                         t_since_last_visit_divisor=None,#total_ot_sec,
@@ -732,6 +734,7 @@ class BinFeatureEngineer:
                         target_counts=self.lookups.target_fid_counts,
                         bins_per_field=bpf, v_mask=vm,
                         nbins=nbins, do_filt=False,
+                        idx2filter=self.survey.idx2filter,
                         timestamp=obs_t,
                         last_visit_timestamps=last_visit_ot_1d,
                         t_since_last_visit_divisor=None,#total_ot_sec,

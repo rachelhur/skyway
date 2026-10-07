@@ -239,14 +239,6 @@ class EnvSignal(IntEnum):
     NO_FILTER = -1
 
 """
-BLANCO CONSTS
-"""
-
-# BLANCO_LAT = -30.169
-BLANCO_LON = "-70:48:23.49"
-BLANCO_ELEV = 2200
-
-"""
 
 ZENITH CONSTANTS
 
@@ -263,36 +255,6 @@ ZENITH_BIN_NUM = -1
 ZENITH_WAVELENGTH = 0
 ZENITH_FILTER_IDX = -1
 ZENITH_FILTER = 'null'
-
-"""
-
-FILTER INFO
-
-"""
-
-# Filter wavelengths (nm) according to obztak https://github.com/kadrlica/obztak/blob/c28fab23b09bcff1cf46746eae4ec7e40aeb7f7a/obztak/seeing.py#L22
-FILTER2WAVE = {
-    # 'u': 380, # not present in train data,
-    'g': 480,
-    'r': 640,
-    'i': 780,
-    'z': 920,
-    'Y': 990
-}
-
-_NUM_FILTERS = len(FILTER2WAVE)
-IDX2WAVE = {i: FILTER2WAVE[k] for i, k in enumerate(FILTER2WAVE.keys())}
-FILTERWAVENORM = 1000.
-
-FILTER2IDX = {k: i for i, k in enumerate(FILTER2WAVE.keys())}
-IDX2FILTER = {v: k for k, v in FILTER2IDX.items()}
-
-# Reference band for seeing (FWHM) projection. Used when a pointing carries no
-# filter (zenith / WAIT) so the wavelength term drops out, and as the default
-# band for seeding forward-sim seeing in OfflineBlancoEnv. r-band by convention
-# (matches the obztak seeing reference above).
-FWHM_REF_FILTER = 'r'
-FWHM_REF_WAVELENGTH = FILTER2WAVE[FWHM_REF_FILTER]
 
 
 # SIN_NORM_FEATURE_NAMES = []

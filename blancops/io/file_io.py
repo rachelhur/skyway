@@ -2,7 +2,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from blancops.configs.constants import IDX2FILTER, WAIT_SIGNAL, ZENITH_BIN_NUM
+from blancops.configs.constants import WAIT_SIGNAL, ZENITH_BIN_NUM
 from blancops.math import units
 from collections import defaultdict
 from pathlib import Path
@@ -59,9 +59,9 @@ def write_SISPI_from_df(schedule_df, out_fn, save_dir, lookups, filter_override_
         input_dict['filter'] = schedule_df[filter_col].to_list()
     filter_val = input_dict['filter']
     if isinstance(filter_val, list):
-        filter_indices = np.array([FILTER2IDX[f] for f in filter_val])
+        filter_indices = np.array([lookups.survey.filter2idx[f] for f in filter_val])
     else:
-        filter_indices = np.full(len(ordered_field_ids), FILTER2IDX[filter_val])
+        filter_indices = np.full(len(ordered_field_ids), lookups.survey.filter2idx[filter_val])
     input_dict['expTime'] = lookups.fidfilt_exptime[ordered_field_ids, filter_indices].astype(int).tolist()
     input_dict['program'] = program
     input_dict['proposer'] = proposer
@@ -138,7 +138,7 @@ def save_survey_schedule(eval_metrics, save_dir, field_lookup, multinight_movie=
 
         # Save schedule
         df = pd.DataFrame(data={k: pd.Series(v) for k, v in full_schedule.items()})
-        df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter']].map(IDX2FILTER)
+        df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter']].map(field_lookup.survey.idx2filter)
         df.to_csv(schedule_path, index=False)
 
     if save_SISPI:
@@ -183,7 +183,7 @@ def save_survey_schedule(eval_metrics, save_dir, field_lookup, multinight_movie=
 
             schedule_path = Path(save_dir) / f"survey_schedule_{obs_night_str}.csv"
             df = pd.DataFrame(data={k: pd.Series(v) for k, v in schedule.items()})
-            df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter']].map(IDX2FILTER)
+            df[SCHEDULE_KEYS['filter']] = df[SCHEDULE_KEYS['filter']].map(field_lookup.survey.idx2filter)
             df.to_csv(schedule_path, index=False)
             write_SISPI_from_df(df, SISPI_fn, save_dir, lookups=field_lookup, dt_series=dt_series)
     return full_schedule

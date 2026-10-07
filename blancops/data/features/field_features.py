@@ -12,13 +12,13 @@ normalization.
 import numpy as np
 from tqdm import tqdm
 
-from blancops.configs.constants import FILTER2IDX, IDX2FILTER, ZENITH_FIELD_ID, _FIELD_FEATURES
+from blancops.configs.constants import ZENITH_FIELD_ID, _FIELD_FEATURES
 from blancops.data.features.candidate_features import compute_candidate_ephemeris_features, get_relative_feature
 from blancops.data.features.glob_features import compute_global_mean_tiling_features, get_night_boundaries
 from blancops.data.features.normalizations import StateNormalizer
 from blancops.ephemerides import ephemerides
 from blancops.ephemerides.ephemerides import HealpixGrid
-from blancops.survey.profiles import DES
+from blancops.survey.profiles import DES, SurveyProfile
 
 _PER_FILTER_FEATURES = ('completion', 'rel_completion', 't_since_last_visit')
 _AIRMASS_CAP = 3.0
@@ -64,13 +64,15 @@ class FieldGrid(HealpixGrid):
         self.npix = len(self.lon)
 
 
-def expand_field_feature_names(base_features: list[str]) -> list[str]:
-    """Expand per-filter base names into `name_{filter}` columns, in FILTER2IDX order.
+def expand_field_feature_names(base_features: list[str], survey: SurveyProfile = DES) -> list[str]:
+    """Expand per-filter base names into `name_{filter}` columns, in the survey's filter order.
 
     Parameters
     ----------
     base_features : list of str
         Base names from `_FIELD_FEATURES`.
+    survey : SurveyProfile
+        Survey whose filters suffix the per-filter names.
 
     Returns
     -------
@@ -80,7 +82,7 @@ def expand_field_feature_names(base_features: list[str]) -> list[str]:
     names = []
     for f in base_features:
         if f in _PER_FILTER_FEATURES:
-            names.extend(f"{f}_{filt}" for filt in FILTER2IDX)
+            names.extend(f"{f}_{filt}" for filt in survey.filters)
         else:
             names.append(f)
     return names
@@ -130,7 +132,7 @@ def build_field_normalizer(feature_names: list[str]) -> StateNormalizer:
 
 def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGrid, night_duration_sec: float,
                            counts: np.ndarray, targets: np.ndarray, last_visit_ot: np.ndarray,
-                           ot_now: float) -> dict:
+                           ot_now: float, survey: SurveyProfile = DES) -> dict:
     """All field features for one timestep.
 
     Completion = count / target (capped at 1); airmass is capped at 3; time since last visit = OT now - last visit, only for
@@ -152,6 +154,8 @@ def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGr
         (n_fields, n_filters) seconds (in observing time OT) of the last visit, NaN if never.
     ot_now : float
         Current OT seconds.
+    survey : SurveyProfile
+        Survey whose filter order indexes axis 1 of the counts.
 
     Returns
     -------
@@ -176,7 +180,7 @@ def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGr
     never_visited = np.isnan(last_visit_ot)
     age = np.where(never_visited, _NEVER_VISITED_AGE, np.maximum(ot_now - np.nan_to_num(last_visit_ot), 0.0))
     age = np.where(in_plan & incomplete, age, np.nan)
-    for f, filt in IDX2FILTER.items():
+    for f, filt in survey.idx2filter.items():
         features[f"completion_{filt}"] = completion[:, f]
         features[f"rel_completion_{filt}"] = get_relative_feature(completion[:, f], el_mask)
         features[f"t_since_last_visit_{filt}"] = age[:, f]
@@ -202,7 +206,8 @@ def stack_field_features(features: dict, feature_names: list[str]) -> np.ndarray
 
 
 def label_mask_report(global_df, current_state_idxs, next_state_idxs, field_features: np.ndarray,
-                      feature_names: list[str], field_dec: np.ndarray, telescope, airmass_limit: float) -> dict:
+                      feature_names: list[str], field_dec: np.ndarray, telescope, airmass_limit: float,
+                      survey: SurveyProfile = DES) -> dict:
     """Count expert labels that the field-level mask of their own state would forbid, by reason.
 
     Reasons: not visible (airmass at or above the limit, or outside the mount envelope), already complete
@@ -224,6 +229,8 @@ def label_mask_report(global_df, current_state_idxs, next_state_idxs, field_feat
         Supplies the visibility rule and mount envelope.
     airmass_limit : float
         Effective airmass limit.
+    survey : SurveyProfile
+        Survey (carries filters and their ordering).
 
     Returns
     -------
@@ -232,12 +239,12 @@ def label_mask_report(global_df, current_state_idxs, next_state_idxs, field_feat
     """
     nxt = global_df.iloc[next_state_idxs]
     fid = nxt['field_id'].to_numpy(dtype=np.int64)
-    filt = nxt['filter'].map(FILTER2IDX).to_numpy(dtype=np.int64)
+    filt = nxt['filter'].map(survey.filter2idx).to_numpy(dtype=np.int64)
     rows = np.asarray(current_state_idxs)
     col = {n: i for i, n in enumerate(feature_names)}
     el = field_features[rows, fid, col['el']]
     ha = field_features[rows, fid, col['ha']]
-    comp_cols = np.array([col[f"completion_{f}"] for f in FILTER2IDX])[filt]
+    comp_cols = np.array([col[f"completion_{f}"] for f in survey.filters])[filt]
     completion = field_features[rows, fid, comp_cols]
     not_visible = ~telescope.visible(el, ha, field_dec[fid], airmass_limit)
     out_of_plan = np.isnan(completion)
@@ -267,8 +274,9 @@ class FieldFeatureEngineer:
         if unknown:
             raise ValueError(f"Unknown field features: {unknown}")
         self.lookups = lookups
+        self.survey = lookups.survey
         self.base_features = list(base_features)
-        self.feature_names = expand_field_feature_names(self.base_features)
+        self.feature_names = expand_field_feature_names(self.base_features, self.survey)
         self.grid = FieldGrid(lookups.fields['ra'].to_numpy(), lookups.fields['dec'].to_numpy())
 
     def _pointing(self, field_id: int, timestamp: float) -> np.ndarray:
@@ -308,9 +316,9 @@ class FieldFeatureEngineer:
         n_rows, n_fields = len(pt_df), len(self.grid.lon)
         if out is None:
             out = np.empty((n_rows, n_fields, len(self.feature_names)), dtype=np.float32)
-        tiling_keys = ['global_mean_tiling'] + [f'global_mean_tiling_{f}' for f in FILTER2IDX]
+        tiling_keys = ['global_mean_tiling'] + [f'global_mean_tiling_{f}' for f in self.survey.filters]
         tiling = {k: np.empty(n_rows, dtype=np.float32) for k in tiling_keys}
-        filt_idx = pt_df['filter'].map(FILTER2IDX).fillna(-1).to_numpy(dtype=np.int64)
+        filt_idx = pt_df['filter'].map(self.survey.filter2idx).fillna(-1).to_numpy(dtype=np.int64)
 
         i = 0
         pbar = tqdm(total=n_rows, desc='Computing field features')
@@ -330,10 +338,11 @@ class FieldFeatureEngineer:
                 feats = compute_field_features(
                     timestamp=ts[j], pointing_radec=self._pointing(fids[j], ts[j]), field_grid=self.grid,
                     night_duration_sec=sunrise_ts - sunset_ts, counts=counts, targets=targets,
-                    last_visit_ot=last_visit, ot_now=obs_t,
+                    last_visit_ot=last_visit, ot_now=obs_t, survey=self.survey,
                 )
                 out[i] = stack_field_features(feats, self.feature_names)
-                mt = compute_global_mean_tiling_features(running_counts=counts, target_counts=targets)
+                mt = compute_global_mean_tiling_features(running_counts=counts, target_counts=targets,
+                                                         survey=self.survey)
                 for k in tiling_keys:
                     tiling[k][i] = mt[k]
                 i += 1

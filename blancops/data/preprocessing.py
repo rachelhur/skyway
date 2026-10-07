@@ -15,13 +15,12 @@ from blancops.io.file_io import (
 from blancops.math import units
 
 from blancops.configs.paths import workspace
-from blancops.configs.constants import FILTER2IDX
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.math import units
 
 import logging
 
-from blancops.survey.profiles import DES
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.configs.enums import AcceptanceRule
 logger = logging.getLogger(__name__)
 
@@ -350,7 +349,8 @@ def _add_field_col(df):
     return df
 
 
-def build_DES_lookups(fits_path=None, outdir=None, acceptance: AcceptanceRule | str = AcceptanceRule.UNIFORM):
+def build_DES_lookups(fits_path=None, outdir=None, acceptance: AcceptanceRule | str = AcceptanceRule.UNIFORM,
+                      survey: SurveyProfile = DES):
     fits_path = Path(fits_path or workspace().des_fits).resolve()
     outdir = Path(outdir or workspace().des_data).resolve()
 
@@ -362,14 +362,14 @@ def build_DES_lookups(fits_path=None, outdir=None, acceptance: AcceptanceRule | 
     # Require field_id is 0..N-1 contiguous
     field2idx = {obj_name: idx for idx, obj_name in enumerate(sorted(df['field'].unique()))}
     df['field_id'] = df['field'].map(field2idx)
-    df["filt_idx"] = df["filter"].map(FILTER2IDX)
+    df["filt_idx"] = df["filter"].map(survey.filter2idx)
 
     num_fields = df["field_id"].nunique()
-    nfilters = len(FILTER2IDX)
+    nfilters = survey.num_filters
 
     # Resolve survey-profile constants once for use below and in the night loop.
-    sun_el_limit = DES.sun_el_limit
-    band_threshold = DES.acceptance_thresholds(acceptance)  # [n_filters]
+    sun_el_limit = survey.sun_el_limit
+    band_threshold = survey.acceptance_thresholds(acceptance)  # [n_filters]
     # teff's own dtype, as the scalar threshold compared (float32 0.3 is not above float32 0.3)
     df["min_teff"] = band_threshold[df["filt_idx"].to_numpy()].astype(df["teff"].dtype)
 
@@ -546,6 +546,7 @@ def build_DES_lookups(fits_path=None, outdir=None, acceptance: AcceptanceRule | 
         night2fidfilt_last_visit_ot=night2fidfilt_last_visit_ot,
         night2ot_clock_seconds=night2ot_clock_seconds,
         acceptance=acceptance,
+        survey=survey,
         # total_ot_sec=total_observing_seconds,
     )
     lookups.write_to_disk(outdir)

@@ -8,7 +8,8 @@ import numpy as np
 from blancops.environment.base import StateSnapshot
 from blancops.environment.seeing_model import PredictiveSeeingModel
 from blancops.data.features.glob_features import get_night_boundaries
-from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER, ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER_IDX
+from blancops.configs.constants import ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER_IDX
+from blancops.survey.profiles import DES
 
 import logging
 
@@ -37,6 +38,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         global_pd_nightgroup,
         night_start_candidate_states: Optional[np.ndarray] = None,
         telescope=None,
+        survey=DES,
         zenith_start: bool = False,
         replay_mode: bool = False,
     ):
@@ -46,6 +48,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             lookups=lookups,
             norm_stats=norm_stats,
             telescope=telescope,
+            survey=survey,
             max_nights=global_pd_nightgroup.ngroups,
         )
         self._groupbynight = global_pd_nightgroup
@@ -206,7 +209,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         valid = ~np.isnan(fwhm_vals) & (night_df['field_id'].to_numpy() != ZENITH_FIELD_ID)
         if valid.any():
             filt = night_df['filter_idx'].to_numpy()[valid]
-            bands = [IDX2FILTER.get(int(f), FWHM_REF_FILTER) for f in filt]
+            bands = [self.idx2filter.get(int(f), self._survey.seeing_ref_filter) for f in filt]
             model.add(
                 date=night_df['timestamp'].to_numpy(dtype=float)[valid],
                 seeing=fwhm_vals[valid],

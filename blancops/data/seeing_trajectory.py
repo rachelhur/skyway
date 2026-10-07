@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.data.features.glob_features import get_night_boundaries
 
 import logging
@@ -52,7 +52,7 @@ def _load_val_df(cache_path: Path) -> pd.DataFrame:
 
 
 def extract_night_seeing_trajectory(
-    cache_path, val_night: str, sun_el_limit: float
+    cache_path, val_night: str, sun_el_limit: float, survey: SurveyProfile = DES
 ) -> pd.DataFrame:
     """Extract one validation night's measured seeing as a replayable trajectory.
 
@@ -66,6 +66,8 @@ def extract_night_seeing_trajectory(
         val_night: Night key (the value in the ``night`` column) to extract.
         sun_el_limit: Sun-elevation limit (deg) defining the night, used to
             compute the night's sunset for the time offset.
+        survey: Survey whose filter indices the cache uses; unknown indices
+            fall back to its seeing reference band.
 
     Returns:
         DataFrame with columns ``sec_since_sunset`` (s), ``fwhm`` (arcsec),
@@ -107,7 +109,8 @@ def extract_night_seeing_trajectory(
 
     fwhm_vals = fwhm_vals[valid]
     timestamps = ts_vals[valid]
-    bands = [IDX2FILTER.get(int(f), FWHM_REF_FILTER) for f in filt_vals[valid]]
+    idx2filter, ref_band = survey.idx2filter, survey.seeing_ref_filter
+    bands = [idx2filter.get(int(f), ref_band) for f in filt_vals[valid]]
     el = el_vals[valid]
 
     sunset_ts, _ = get_night_boundaries(val_night, sun_el_limit=sun_el_limit)
