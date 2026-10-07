@@ -100,6 +100,23 @@ def workspace() -> WorkspacePaths:
 # Data directory layout                                              #
 # ------------------------------------------------------------------ #
 
+def resolve_data_dir(data_dir: str | Path) -> Path:
+    """A run's data folder: absolute as given, or relative to the workspace root.
+
+    Parameters
+    ----------
+    data_dir : str or Path
+        `data.data_dir` from a config.
+
+    Returns
+    -------
+    Path
+        Absolute data folder.
+    """
+    p = Path(data_dir)
+    return p if p.is_absolute() else workspace().root / p
+
+
 def lookups_dir(data_dir: Path) -> Path:
     """Lookup-table directory under a data directory.
 
@@ -302,9 +319,14 @@ class RunPaths:
         """Cached normalized dataset for one split: checkpoints/<split>_dataset_cache.pt."""
         return self.checkpoints / f"{split}_dataset_cache.pt"
 
-    def eval_dir(self, split: str = "val") -> Path:
-        """Evaluation output directory: holdout_eval for val, else <split>_eval."""
-        return self.root / ("holdout_eval" if split == "val" else f"{split}_eval")
+    def eval_dir(self, split: str = "val", action_decoding: str = "joint") -> Path:
+        """Evaluation output directory: holdout_eval for val, else <split>_eval.
+
+        A `filter_first` action decoding appends `_filter_first`.
+        """
+        name = "holdout_eval" if split == "val" else f"{split}_eval"
+        suffix = "_filter_first" if action_decoding == "filter_first" else ""
+        return self.root / f"{name}{suffix}"
 
     def make_dirs(self) -> None:
         """Create the run's standard sub-directories."""

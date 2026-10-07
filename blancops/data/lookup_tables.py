@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from blancops.configs.enums import LookupKeys
+from blancops.configs.enums import AcceptanceRule, LookupKeys
 from blancops.configs.constants import FILTER2IDX
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.math import units
@@ -495,6 +495,8 @@ class TrainLookupTables(LookupTables):
     night2fid_last_visit_ot: Optional[dict] = None
     night2fidfilt_last_visit_ot: Optional[dict] = None
     night2ot_clock_seconds: Optional[dict] = None
+    # Which exposures counted toward targets and visit history
+    acceptance: AcceptanceRule = AcceptanceRule.UNIFORM
 
     # Derived marginals
     night2idx: Optional[dict] = None
@@ -510,16 +512,37 @@ class TrainLookupTables(LookupTables):
         cls,
         data_dir: Path,
         overrides: Optional[Dict[LookupKeys, str]] = None,
+        acceptance: Optional[AcceptanceRule | str] = None,
     ) -> "TrainLookupTables":
-        """Load lookups from a directory, including historic context."""
+        """Load lookups from a directory, including historic context.
+
+        Parameters
+        ----------
+        data_dir : Path
+            Lookups folder.
+        overrides : dict or None
+            File name overrides per lookup key.
+        acceptance : AcceptanceRule, str, or None
+            Rule the caller expects the lookups to be built with; None skips the check.
+
+        Returns
+        -------
+        TrainLookupTables
+            The loaded lookups.
+        """
         overrides = overrides or {}
         data_dir = Path(data_dir).resolve()
 
         def get_path(key):
             return data_dir / overrides.get(key, key.value)
 
+        accept_rule = cls.load_acceptance(data_dir)
+        if acceptance is not None:
+            accept_rule.require(acceptance, data_dir)
+
         # 1. Start with base kwargs
         kwargs = cls._load_base_kwargs(data_dir, overrides)
+        kwargs["acceptance"] = accept_rule
 
         # 2. Add historical tables
         with open(get_path(LookupKeys.NIGHT2FID_VISIT_HIST), "rb") as f:
@@ -577,11 +600,20 @@ class TrainLookupTables(LookupTables):
 
         return cls(**kwargs)
 
+    @staticmethod
+    def load_acceptance(data_dir: Path) -> AcceptanceRule:
+        """Acceptance rule a lookups folder was built with."""
+        record = json.loads((Path(data_dir) / LookupKeys.ACCEPTANCE.value).read_text())
+        return AcceptanceRule(record["acceptance"])
+
     def write_to_disk(self, outdir: Optional[Path] = None) -> None:
         """Persist training state alongside base lookups."""
         super().write_to_disk(outdir)
 
         outdir = Path(outdir if outdir is not None else self.dir)
+
+        # ACCEPTANCE RULE
+        (outdir / LookupKeys.ACCEPTANCE.value).write_text(json.dumps({"acceptance": self.acceptance.value}))
 
         # VISIT HISTORY
         if self.night2fid_visit_hist is not None:
@@ -639,12 +671,14 @@ class TrainLookupTables(LookupTables):
             "night2fid_last_visit_ot": _pad_1d(self.night2fid_last_visit_ot, pad_val=np.nan),
             "night2fidfilt_last_visit_ot": _pad_2d(self.night2fidfilt_last_visit_ot, pad_val=np.nan),
             "night2ot_clock_seconds": self.night2ot_clock_seconds,
+            "acceptance": self.acceptance,
         })
         return TrainLookupTables(**kwargs)
 
 
     def __post_init__(self):
         super().__post_init__()
+        object.__setattr__(self, "acceptance", AcceptanceRule(self.acceptance))
         nfields, nfilters = self.target_fidfilt_counts.shape
         self._validate_history_shapes(nfields, nfilters)
 

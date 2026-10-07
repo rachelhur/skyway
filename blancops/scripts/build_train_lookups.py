@@ -2,10 +2,12 @@ import argparse
 import numpy as np
 from pathlib import Path
 from blancops.data.preprocessing import build_DES_lookups
+from blancops.data.lookup_tables import TrainLookupTables
 from blancops.math import units
 
-from blancops.configs.paths import lookups_dir, workspace
+from blancops.configs.paths import lookups_dir, resolve_data_dir, workspace
 from blancops.configs.constants import FILTER2IDX
+from blancops.configs.enums import AcceptanceRule, LookupKeys
 import matplotlib.pyplot as plt
 import warnings
 import logging
@@ -23,7 +25,16 @@ def main():
     )
     parser.add_argument(
         "-o", "--out_parent_dir", type=Path, default=workspace().des_data,
-        help="Directory to save the generated lookup tables. Defaults to workspace().des_data)",
+        help="Directory to save the generated lookup tables; relative paths are under the workspace root. Defaults to workspace().des_data",
+    )
+    parser.add_argument(
+        "--acceptance", choices=[r.value for r in AcceptanceRule], default=AcceptanceRule.UNIFORM.value,
+        help="Which exposures count toward the survey: one 0.3 teff threshold, or DES's per-band "
+             "minimum teff (Morganson et al. 2018, Table 4). Must match data.acceptance of the runs using these lookups.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Allow replacing existing lookups that were built with a different --acceptance.",
     )
     parser.add_argument(
         '-p', '--save_plots', action="store_true",
@@ -45,8 +56,13 @@ def main():
     # --------------------------------------
     # SETUP OUTDIR
     # --------------------------------------
-    out_parent_dir = Path(args.out_parent_dir)
+    out_parent_dir = resolve_data_dir(args.out_parent_dir)
     lookups_outdir = lookups_dir(out_parent_dir)
+    built = ((lookups_outdir / LookupKeys.ACCEPTANCE.value).exists()
+             and TrainLookupTables.load_acceptance(lookups_outdir).value)
+    if built and built != args.acceptance and not args.overwrite:
+        raise SystemExit(f"{lookups_outdir} holds lookups built with acceptance '{built}'; pass a different "
+                         f"-o for '{args.acceptance}', or --overwrite to replace them.")
     figures_outdir = out_parent_dir / "figures"
     lookups_outdir.mkdir(parents=True, exist_ok=True)
     figures_outdir.mkdir(parents=True, exist_ok=True)
@@ -55,7 +71,7 @@ def main():
     # --------------------------------------
     # BUILD LOOKUPS
     # --------------------------------------
-    lookups = build_DES_lookups(fits_path=args.fits_path, outdir=lookups_outdir)
+    lookups = build_DES_lookups(fits_path=args.fits_path, outdir=lookups_outdir, acceptance=args.acceptance)
     save = args.save_plots
 
     # --------------------------------------

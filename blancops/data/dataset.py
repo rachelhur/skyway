@@ -418,6 +418,7 @@ class TransitionDataset(torch.utils.data.Dataset):
     def _setup_configuration(self, cfg, norm_kwargs):
         self._seeing_cfg = cfg.data.seeing
         self._min_teff = cfg.data.min_teff
+        self._band_threshold = DES.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
         self._drop_interrupted_transitions = getattr(cfg.data, 'drop_interrupted', False)
         self.reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
         self._calculate_action_mask = cfg.model.algorithm != 'bc' # expensive and not needed for bc
@@ -495,7 +496,6 @@ class TransitionDataset(torch.utils.data.Dataset):
                 cache.field_features, cache.state_idxs, field_indices
             )
             self._field_cache = cache
-            # global_mean_tiling from valid-only counts, matching field-level progress
             self._df = self._df.copy()
             for name, values in cache.field_tiling.items():
                 if name in self._df.columns:
@@ -691,9 +691,50 @@ class TransitionDataset(torch.utils.data.Dataset):
         return {
             RewardTerm.EXPERT: lambda: dict(n_transitions=len(next_state_idxs)),
             RewardTerm.TEFF: lambda: dict(teff=next_df['teff'].values),
+            RewardTerm.TEFF_ACCEPTED: lambda: self._teff_accepted_inputs(next_df),
             RewardTerm.SLEW: lambda: dict(excess_times=self._excess_dead_times(df, next_state_idxs)),
             RewardTerm.UNIFORMITY: lambda: self._uniformity_inputs(df, next_state_idxs),
         }
+
+    @staticmethod
+    def _exposure_field_filter_idxs(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Exposure mask and integer field and filter indices per row; non-exposures get index 0.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Rows with field_id and filter.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray, np.ndarray]
+            is_exposure (bool), field_ids (int), filter_idxs (int), each shape (n_rows,).
+        """
+        is_exposure = (df['field_id'] != ZENITH_FIELD_ID).to_numpy()
+        field_ids = np.where(is_exposure, df['field_id'].to_numpy(), 0).astype(int)
+        filter_idxs = df['filter'].map(FILTER2IDX).fillna(0).to_numpy().astype(int)
+        return is_exposure, field_ids, filter_idxs
+
+    def _teff_accepted_inputs(self, next_df: pd.DataFrame) -> dict:
+        """Inputs of the accepted effective-seconds reward for each transition's exposure.
+
+        Exposure time comes from the lookups (most common per field-filter), as in the environment,
+        so offline and rollout rewards agree. A transition that is not an exposure earns 0.
+
+        Parameters
+        ----------
+        next_df : pd.DataFrame
+            Row of each transition's exposure, with field_id, filter, teff.
+
+        Returns
+        -------
+        dict
+            teff, min_teff, exptime, each shape (n_transitions,).
+        """
+        is_exposure, field_ids, filter_idxs = self._exposure_field_filter_idxs(next_df)
+        exptime = np.where(is_exposure, self.lookups.fidfilt_exptime[field_ids, filter_idxs], 0.0)
+        min_teff = np.where(is_exposure, self._band_threshold[filter_idxs], 0.0)
+        return dict(teff=next_df['teff'].to_numpy(dtype=float), min_teff=min_teff, exptime=exptime)
 
     def _uniformity_inputs(self, df, next_state_idxs) -> dict: # XXX make independent of form of uniformity metric
         """Inputs of the uniformity reward for each transition, from survey counts before its exposure.
@@ -728,10 +769,10 @@ class TransitionDataset(torch.utils.data.Dataset):
         total_target = targets.sum(axis=0)                                              # [n_filters]
         inv_target = np.divide(1.0, targets, out=np.zeros_like(targets), where=in_plan)
 
-        is_exposure = (df['field_id'] != ZENITH_FIELD_ID).to_numpy()
-        is_valid = is_exposure & (df['teff'].to_numpy() > DES.valid_teff_threshold)
-        field_ids = np.where(is_exposure, df['field_id'].to_numpy(), 0).astype(int)
-        filter_idxs = df['filter'].map(FILTER2IDX).fillna(0).to_numpy().astype(int)
+        is_exposure, field_ids, filter_idxs = self._exposure_field_filter_idxs(df)
+        teff = df['teff'].to_numpy()
+        # compare in teff's own dtype, as the scalar threshold did (float32 0.3 is not above float32 0.3)
+        is_valid = is_exposure & (teff > self._band_threshold[filter_idxs].astype(teff.dtype))
         pass_size = np.where(is_valid, inv_target[field_ids, filter_idxs], 0.0)
 
         count_start = np.zeros(len(df))

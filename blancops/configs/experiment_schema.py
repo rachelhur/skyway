@@ -83,15 +83,13 @@ class NormalizationConfig(BaseModel):
 class SeeingConfig(BaseModel):
     """Parameters for the Seeing rolling-history predictor.
 
-    Shared by the offline causal-fwhm feature builder, the historic
-    validation env, and the live env so train and serve agree. Instrument
-    components are in arcsec and converted to native angle units when a
-    Seeing instance is built.
+    Shared by the offline fwhm feature builder, the historic
+    validation env, and the live env.
     """
     window: str = "15m"
     retention_window: Optional[str] = None
-    from_instrument: float = 0.5
-    to_instrument: float = 0.5
+    from_instrument: float = 0.5 # arcsec
+    to_instrument: float = 0.5 # arcsec
 
 
 class BaseDataConfig(BaseModel):
@@ -102,6 +100,10 @@ class BaseDataConfig(BaseModel):
     # Data configuration
     nside: int = 16
     action_space: str
+    # Folder holding this run's lookups and feature caches
+    data_dir: str = Field(default_factory=lambda: str(workspace().des_data))
+    # Which exposures count toward the survey: one 0.3 threshold, or DES's per-band minimum teff
+    acceptance: AcceptanceRule = AcceptanceRule.UNIFORM
 
     # Normalization configuration
     norm: NormalizationConfig = Field(default_factory=NormalizationConfig)

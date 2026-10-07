@@ -159,6 +159,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         # Reward: same terms as the offline dataset, scaled with the training reward stats.
         # _step_record is set by _advance_after_action (None on WAIT).
         self._reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
+        self._band_threshold = DES.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
         self._step_record: dict | None = None
 
         # Feature Configs
@@ -438,14 +439,10 @@ class BaseBlancoEnv(gym.Env, ABC):
     def _record_visit(self, field_id: int, filter_idx: int = None) -> None:
         """Bookkeeping after a successful observation.
 
-        Single source of truth for visit accumulation: keeps
-        `_s_visits_cur`, `_s_filter_visits_cur`, and the survey-progress
+        Keeps `_s_visits_cur`, `_s_filter_visits_cur`, and the survey-progress
         tracker in sync. Called by `_advance_after_action` in each
-        concrete subclass for every non-wait action. On the field path only
-        a valid exposure (predicted teff above the survey threshold) counts.
+        concrete subclass for every non-wait action.
         """
-        if self.field_level and not self._step_is_valid(self._step_record):
-            return
         self._survey_progress_tracker.increment(
             field_id=field_id,
             filter_idx=filter_idx if self.do_filt else None,
@@ -616,8 +613,9 @@ class BaseBlancoEnv(gym.Env, ABC):
         return self._reward_cfg is not None and term in self._reward_cfg.terms
 
     def _needs_seeing_model(self) -> bool:
-        """Whether the fwhm feature, or the teff or uniformity reward term (via predicted teff), needs a seeing model."""
+        """Whether the fwhm feature, or a teff-based or uniformity reward term (via predicted teff), needs a seeing model."""
         return ("fwhm" in self.global_feature_names or self._uses_reward_term(RewardTerm.TEFF)
+                or self._uses_reward_term(RewardTerm.TEFF_ACCEPTED)
                 or self._uses_reward_term(RewardTerm.UNIFORMITY) or self.field_level)
 
     def _step_is_valid(self, s: dict | None) -> bool:
@@ -635,15 +633,23 @@ class BaseBlancoEnv(gym.Env, ABC):
         """
         if s is None:
             return False
+        return bool(self._teff_pred(s) > self._min_teff(s))
+
+    def _teff_pred(self, s: dict) -> float:
+        """Predicted teff of a step."""
         if 'teff_pred' not in s:
             s['teff_pred'] = self._predict_teff(s)
-        return bool(s['teff_pred'] > DES.valid_teff_threshold)
+        return s['teff_pred']
+
+    def _min_teff(self, s: dict) -> float:
+        """Minimum accepted teff for a step's filter under the run's acceptance rule."""
+        return float(self._band_threshold[int(s['filter_idx'])])
 
     def _uniformity_step_inputs(self, s: dict) -> dict | None:
         """Uniformity reward inputs from survey counts before this exposure; None when the term is unused.
 
         An exposure whose predicted teff is at or below the survey threshold earns no uniformity credit
-        (pass_size 0). Bin runs still count it in the tracker; field runs do not. # XXX unify
+        (pass_size 0), though it still counts in the tracker.
 
         Parameters
         ----------
@@ -659,8 +665,7 @@ class BaseBlancoEnv(gym.Env, ABC):
             return None
         tracker = self._survey_progress_tracker
         inputs = uniformity_inputs(tracker.raw_counts, tracker.target_counts, s['field_id'], s['filter_idx'])
-        self._step_is_valid(s)
-        if s['teff_pred'] <= DES.valid_teff_threshold:
+        if not self._step_is_valid(s):
             inputs['pass_size'] = np.zeros(1)
         return inputs
 
@@ -684,6 +689,9 @@ class BaseBlancoEnv(gym.Env, ABC):
         return {
             RewardTerm.EXPERT: lambda: dict(n_transitions=1),
             RewardTerm.TEFF: lambda: dict(teff=np.array([self._predict_teff(s)])),
+            RewardTerm.TEFF_ACCEPTED: lambda: dict(
+                teff=np.array([self._teff_pred(s)]), min_teff=np.array([self._min_teff(s)]),
+                exptime=np.array([self._get_exposure_time(s['field_id'], s['filter_idx'])])),
             RewardTerm.SLEW: lambda: dict(excess_times=np.array(
                 [s['dead_time'] - params.visit_overhead(s['filter_change'])])),
             RewardTerm.UNIFORMITY: lambda: s['uniformity'],

@@ -134,7 +134,6 @@ class LiveBlancoEnv(BaseBlancoEnv):
         """
         field_id = int(obs_row["field_id"])
         filter_idx = int(FILTER2IDX[obs_row["filter"]])
-        # Field runs count the submission only if its predicted teff is valid (judged at submission time).
         self._step_record = dict(field_id=field_id, filter_idx=filter_idx, t_start=float(self._ts))
         self._record_visit(field_id=field_id, filter_idx=filter_idx)
         self._field_id = field_id
@@ -195,9 +194,6 @@ class LiveBlancoEnv(BaseBlancoEnv):
                 )
                 continue
             ot = float(self._ot_at_sunset + (int(row.timestamp) - self._sunset_ts))
-            if self.field_level and not self._step_is_valid(dict(
-                    field_id=field_id, filter_idx=int(FILTER2IDX[row.filter]), t_start=float(row.timestamp))):
-                continue
             if self.do_filt:
                 filter_idx = int(FILTER2IDX[row.filter])
                 counts[field_id, filter_idx] += 1

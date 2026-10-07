@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 from collections import defaultdict
 
 from blancops.configs.constants import FILTER2IDX, _NUM_FILTERS
-from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, workspace
+from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, resolve_data_dir
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
 from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
@@ -110,9 +110,10 @@ def build_evaluators(
     telescope = get_telescope("blanco")
 
     # Load val dataset from cache or reconstruct from feature cache
-    lookups = TrainLookupTables.load_from_dir(lookups_dir(workspace().des_data))
+    _data_dir = resolve_data_dir(data_dir if data_dir is not None else cfg.data.data_dir)
+    lookups = TrainLookupTables.load_from_dir(lookups_dir(_data_dir), acceptance=cfg.data.acceptance)
+    logger.info(f"Loaded lookups from {lookups_dir(_data_dir)} (acceptance '{cfg.data.acceptance}')")
     val_cache_path = run_paths.dataset_cache(split)
-    _data_dir = Path(data_dir) if data_dir is not None else workspace().des_data
     field_level_cache = is_field_level(cfg.data.action_space)
     cache_cls = FieldFeatureCache if field_level_cache else BinFeatureCache
     cache_dir = (field_feature_cache_dir(_data_dir) if field_level_cache
@@ -136,8 +137,9 @@ def build_evaluators(
                 f"No {split} nights found in {split_json} or in the config; "
                 f"cannot reconstruct the {split} dataset."
             )
-        full_cache = (FieldFeatureCache.load(cache_dir, mmap=True) if field_level_cache
-                      else BinFeatureCache.load(cache_dir, mmap_bin=True))
+        full_cache = (FieldFeatureCache.load(cache_dir, mmap=True, acceptance=cfg.data.acceptance)
+                      if field_level_cache
+                      else BinFeatureCache.load(cache_dir, mmap_bin=True, acceptance=cfg.data.acceptance))
         val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
             cache=val_raw_cache, cfg=cfg, lookups=lookups,
@@ -749,6 +751,8 @@ class MultiStepEvaluator(Evaluator):
                 self.eval_metrics = pickle.load(f)
                 logger.info(f"Results already exist in {metrics_path}. \
                             Pass overwrite=True to re-run.")
+            if self.runner.save_movie:
+                self._save_missing_movies()
         else:
             self.eval_metrics = self.runner.run(env=self.env)
             metrics_path.parent.mkdir(parents=True, exist_ok=True)

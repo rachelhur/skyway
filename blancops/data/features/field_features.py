@@ -4,9 +4,9 @@ One helper, `compute_field_features`, computes every field feature for one times
 `FieldFeatureEngineer` and the environments both call it. Positional features reuse the candidate ephemeris
 math evaluated at field centers through `FieldGrid`.
 
-Progress convention: counts, completion, and last-visit times advance only for valid exposures
-(teff > DES.valid_teff_threshold). The features of a state include that state's own exposure, matching the
-environment after a step. Out-of-plan field-filters are NaN internally and become the sentinel in
+Progress convention: counts start each night from the lookups (valid exposures only, like the targets) and
+advance for every exposure of the night, as on the bin path. The features of a state include that state's own
+exposure, matching the environment after a step. Out-of-plan field-filters are NaN internally and become the sentinel in
 normalization.
 """
 import numpy as np
@@ -23,6 +23,7 @@ from blancops.survey.profiles import DES
 _PER_FILTER_FEATURES = ('completion', 'rel_completion', 't_since_last_visit')
 _AIRMASS_CAP = 3.0
 _LOG_FEATURES = ('t_since_last_visit',)
+_NEVER_VISITED_AGE = 5 * 365.25 * 86400.0
 
 # Physical range (lo, hi) per base feature; normalization maps it to about [-1, 1].
 # t_since_last_visit is in observing-time seconds and ranged after a log transform.
@@ -40,7 +41,7 @@ FIELD_FEATURE_RANGES = {
     'rel_moon_distance': (-np.pi, np.pi),
     'completion': (0.0, 1.0),
     'rel_completion': (-1.0, 1.0),
-    't_since_last_visit': (np.log(60.0), np.log(5 * 365.25 * 86400.0)),
+    't_since_last_visit': (np.log(60.0), np.log(_NEVER_VISITED_AGE)),
 }
 
 
@@ -132,8 +133,8 @@ def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGr
                            ot_now: float) -> dict:
     """All field features for one timestep.
 
-    Completion = count / target (capped at 1); airmass is capped at 3; time since last visit = OT now - last valid visit, only for
-    in-plan incomplete field-filters; relative features subtract the mean over fields above the horizon.
+    Completion = count / target (capped at 1); airmass is capped at 3; time since last visit = OT now - last visit, only for
+    in-plan incomplete field-filters, and the top of its range when never visited; relative features subtract the mean over fields above the horizon.
 
     Parameters
     ----------
@@ -146,9 +147,9 @@ def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGr
     night_duration_sec : float
         Night duration used to scale t_until_set.
     counts, targets : np.ndarray
-        (n_fields, n_filters) valid visit counts and survey targets.
+        (n_fields, n_filters) visit counts and survey targets.
     last_visit_ot : np.ndarray
-        (n_fields, n_filters) OT seconds of the last valid visit, NaN if never.
+        (n_fields, n_filters) seconds (in observing time OT) of the last visit, NaN if never.
     ot_now : float
         Current OT seconds.
 
@@ -172,8 +173,9 @@ def compute_field_features(timestamp: float, pointing_radec, field_grid: FieldGr
     completion = np.full(counts.shape, np.nan, dtype=np.float64)
     np.divide(counts, targets, out=completion, where=in_plan)
     completion = np.minimum(completion, 1.0)
-    age = np.where(in_plan & incomplete & ~np.isnan(last_visit_ot),
-                   np.maximum(ot_now - last_visit_ot, 0.0), np.nan)
+    never_visited = np.isnan(last_visit_ot)
+    age = np.where(never_visited, _NEVER_VISITED_AGE, np.maximum(ot_now - np.nan_to_num(last_visit_ot), 0.0))
+    age = np.where(in_plan & incomplete, age, np.nan)
     for f, filt in IDX2FILTER.items():
         features[f"completion_{filt}"] = completion[:, f]
         features[f"rel_completion_{filt}"] = get_relative_feature(completion[:, f], el_mask)
@@ -309,8 +311,6 @@ class FieldFeatureEngineer:
         tiling_keys = ['global_mean_tiling'] + [f'global_mean_tiling_{f}' for f in FILTER2IDX]
         tiling = {k: np.empty(n_rows, dtype=np.float32) for k in tiling_keys}
         filt_idx = pt_df['filter'].map(FILTER2IDX).fillna(-1).to_numpy(dtype=np.int64)
-        # Compare in the stored dtype, exactly as the dataset's uniformity inputs do.
-        is_valid = pt_df['teff'].to_numpy() > DES.valid_teff_threshold
 
         i = 0
         pbar = tqdm(total=n_rows, desc='Computing field features')
@@ -324,7 +324,7 @@ class FieldFeatureEngineer:
             for j in range(len(group)):
                 obs_t = ot_sunset + (ts[j] - sunset_ts)
                 f = filt_idx[i]
-                if fids[j] != ZENITH_FIELD_ID and f >= 0 and is_valid[i]:
+                if fids[j] != ZENITH_FIELD_ID and f >= 0:
                     counts[fids[j], f] += 1
                     last_visit[fids[j], f] = obs_t
                 feats = compute_field_features(

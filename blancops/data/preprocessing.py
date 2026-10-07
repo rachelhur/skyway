@@ -22,6 +22,7 @@ from blancops.math import units
 import logging
 
 from blancops.survey.profiles import DES
+from blancops.configs.enums import AcceptanceRule
 logger = logging.getLogger(__name__)
 
 
@@ -349,7 +350,7 @@ def _add_field_col(df):
     return df
 
 
-def build_DES_lookups(fits_path=None, outdir=None):
+def build_DES_lookups(fits_path=None, outdir=None, acceptance: AcceptanceRule | str = AcceptanceRule.UNIFORM):
     fits_path = Path(fits_path or workspace().des_fits).resolve()
     outdir = Path(outdir or workspace().des_data).resolve()
 
@@ -368,14 +369,16 @@ def build_DES_lookups(fits_path=None, outdir=None):
 
     # Resolve survey-profile constants once for use below and in the night loop.
     sun_el_limit = DES.sun_el_limit
-    valid_teff_threshold = DES.valid_teff_threshold
+    band_threshold = DES.acceptance_thresholds(acceptance)  # [n_filters]
+    # teff's own dtype, as the scalar threshold compared (float32 0.3 is not above float32 0.3)
+    df["min_teff"] = band_threshold[df["filt_idx"].to_numpy()].astype(df["teff"].dtype)
 
     # Quality threshold — only targets and per-night history derive
     # from this set, so completion checks and seeded state agree.
-    valid_df = df[df["teff"] > valid_teff_threshold].copy()
+    valid_df = df[df["teff"] > df["min_teff"]].copy()
     if len(valid_df) == 0:
         raise ValueError(
-            f"No observations with teff > {valid_teff_threshold} in "
+            f"No observations above the '{acceptance}' teff thresholds in "
             f"{fits_path}; check input data quality."
         )
 
@@ -464,7 +467,7 @@ def build_DES_lookups(fits_path=None, outdir=None):
         night2fidfilt_last_visit_ot[night] = fidfilt_last_visit_ot.copy()
 
 
-        valid_night = night_df[night_df["teff"] > valid_teff_threshold]
+        valid_night = night_df[night_df["teff"] > night_df["min_teff"]]
         if len(valid_night):
             # Visit counts
             field_running += np.bincount(
@@ -542,9 +545,10 @@ def build_DES_lookups(fits_path=None, outdir=None):
         night2fid_last_visit_ot=night2fid_last_visit_ot,
         night2fidfilt_last_visit_ot=night2fidfilt_last_visit_ot,
         night2ot_clock_seconds=night2ot_clock_seconds,
+        acceptance=acceptance,
         # total_ot_sec=total_observing_seconds,
     )
     lookups.write_to_disk(outdir)
-    logger.info(f" [+] Successfully generated all lookup tables in {outdir}")
+    logger.info(f" [+] Successfully generated all lookup tables in {outdir} (acceptance '{acceptance}')")
 
     return lookups

@@ -67,9 +67,36 @@ def grid_is_azel(action_space: str) -> bool:
 
 class RewardTerm(str, Enum):
     TEFF = "teff"
+    TEFF_ACCEPTED = "teff_accepted"  # accepted effective seconds, relative to nominal 90 s exposures
     SLEW = "slew"
     EXPERT = "expert"
     UNIFORMITY = "uniformity"
+
+
+class AcceptanceRule(str, Enum):
+    """Which exposures count toward the survey."""
+    UNIFORM = "uniform_0.3"         # one 0.3 teff threshold for every band (legacy)
+    DES_PER_BAND = "des_per_band"   # DES's per-band minimum teff (Morganson et al. 2018, Table 4)
+
+    def require(self, wanted: "AcceptanceRule | str", source) -> None:
+        """Refuse a requested rule that differs from this one, the rule ``source`` was built with.
+
+        Parameters
+        ----------
+        wanted : AcceptanceRule or str
+            Rule the caller asked for.
+        source : Path or str
+            Folder built with this rule, named in the error.
+
+        Raises
+        ------
+        ValueError
+            Naming both rules and the source.
+        """
+        wanted = AcceptanceRule(wanted)
+        if wanted is not self:
+            raise ValueError(f"{source} was built with acceptance '{self.value}', but '{wanted.value}' "
+                             f"was asked for. Rebuild it or fix data.acceptance.")
 
 
 class LookupKeys(str, Enum):
@@ -93,3 +120,4 @@ class LookupKeys(str, Enum):
     NIGHT2OT_CLOCK_SECONDS = "night2observing_time_seconds.pkl"
     # TOTAL_OT_SECONDS = "total_observing_time_seconds.txt"
     HISTORIC_OBSERVATIONS = "historic_observations.json"
+    ACCEPTANCE = "acceptance.json"  # acceptance rule the lookups were built with

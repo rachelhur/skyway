@@ -27,6 +27,7 @@ from blancops.configs.constants import (
     _GLOBAL_FEATURES,
     ZENITH_FIELD_ID,
 )
+from blancops.configs.enums import AcceptanceRule
 from blancops.data.features.bin_features import BinFeatureEngineer
 from blancops.data.features.glob_features import GlobalFeatureEngineer
 from blancops.math import geometry
@@ -116,7 +117,7 @@ class BinFeatureCache:
 
     Disk layout (under ``cache_dir/``):
 
-        metadata.json: nside, is_azel, feature name lists, n_rows, n_bins
+        metadata.json: nside, is_azel, feature name lists, n_rows, n_bins, acceptance
         global_df.parquet: enriched DataFrame with ALL global feature columns
         bin_features.npy: (n_rows, n_bins, n_bin_feats) float32; memmap-friendly
         transitions.npz: compressed arrays: state_idxs, current_state_idxs,
@@ -143,6 +144,9 @@ class BinFeatureCache:
     current_state_idxs: np.ndarray
     next_state_idxs: np.ndarray
     slew_distances: np.ndarray  # (n_transitions,) float32
+
+    # Acceptance rule of the lookups the features were computed from
+    acceptance: AcceptanceRule
 
     # Interrupted survey exposures keyed by expnum; None when the cache has no interruptions file
     interruptions: Optional[pd.DataFrame] = None
@@ -228,6 +232,7 @@ class BinFeatureCache:
             current_state_idxs=current_state_idxs,
             next_state_idxs=next_state_idxs,
             slew_distances=slew_distances,
+            acceptance=lookups.acceptance,
         )
 
     # ------------------------------------------------------------------
@@ -281,6 +286,7 @@ class BinFeatureCache:
             current_state_idxs=current_state_idxs,
             next_state_idxs=next_state_idxs,
             slew_distances=slew_distances,
+            acceptance=self.acceptance,
             interruptions=self.interruptions,
         )
 
@@ -300,6 +306,7 @@ class BinFeatureCache:
             'bin_feature_names': self.bin_feature_names,
             'n_rows': int(len(self.global_df)),
             'n_bins': int(self.bin_features.shape[1]),
+            'acceptance': self.acceptance.value,
         }
         with open(cache_dir / 'metadata.json', 'w') as f:
             json.dump(meta, f, indent=2)
@@ -338,7 +345,8 @@ class BinFeatureCache:
     @classmethod
     def load(cls, cache_dir: Path, mmap_bin: bool = False,
              start_date: str | None = None,
-             end_date: str | None = None) -> 'BinFeatureCache':
+             end_date: str | None = None,
+             acceptance: AcceptanceRule | str | None = None) -> 'BinFeatureCache':
         """Load from disk.
 
         Args:
@@ -346,11 +354,15 @@ class BinFeatureCache:
             mmap_bin:    If True, ``bin_features`` is memory-mapped (read-only).
             start_date:  Inclusive lower bound on night (``'YYYY-MM-DD'``).
             end_date:    Inclusive upper bound on night (``'YYYY-MM-DD'``).
+            acceptance:  Rule the caller expects the cache to be built with; None skips the check.
         """
         cache_dir = Path(cache_dir)
 
         with open(cache_dir / 'metadata.json') as f:
             meta = json.load(f)
+        accept_rule = AcceptanceRule(meta['acceptance'])
+        if acceptance is not None:
+            accept_rule.require(acceptance, cache_dir)
         logger.info(f"Loading BinFeatureCache metadata from {cache_dir}")
 
         global_df = pd.read_parquet(cache_dir / 'global_df.parquet')
@@ -373,6 +385,7 @@ class BinFeatureCache:
             current_state_idxs=t['current_state_idxs'],
             next_state_idxs=t['next_state_idxs'],
             slew_distances=t['slew_distances'],
+            acceptance=accept_rule,
             interruptions=(pd.read_parquet(cache_dir / cls.INTERRUPTIONS_FILE)
                            if (cache_dir / cls.INTERRUPTIONS_FILE).exists() else None),
         )
@@ -466,10 +479,10 @@ class FieldFeatureCache:
 
     Disk layout (under ``cache_dir/``):
 
-        metadata.json: global and field feature names, n_rows, n_fields
+        metadata.json: global and field feature names, n_rows, n_fields, acceptance
         global_df.parquet: enriched DataFrame with all global feature columns (no bin column)
         field_features.npy: (n_rows, n_fields, n_field_feats) float32; memmap-friendly
-        field_tiling.npz: per-row valid-only global_mean_tiling (overall and per filter)
+        field_tiling.npz: per-row global_mean_tiling including the row's own exposure (overall and per filter)
         transitions.npz: state_idxs, current_state_idxs, next_state_idxs, slew_distances (field centers)
         interruptions.parquet: survey exposures (by expnum) interrupted by other archived exposures
     """
@@ -488,6 +501,7 @@ class FieldFeatureCache:
     current_state_idxs: np.ndarray
     next_state_idxs: np.ndarray
     slew_distances: np.ndarray
+    acceptance: AcceptanceRule
     interruptions: Optional[pd.DataFrame] = None
 
     @classmethod
@@ -543,7 +557,8 @@ class FieldFeatureCache:
             interruptions.to_parquet(cache_dir / cls.INTERRUPTIONS_FILE, index=False)
         with open(cache_dir / 'metadata.json', 'w') as f:
             json.dump({'global_feature_names': global_feature_names, 'field_feature_names': eng.feature_names,
-                       'n_rows': int(len(global_df)), 'n_fields': int(len(eng.grid.lon))}, f, indent=2)
+                       'n_rows': int(len(global_df)), 'n_fields': int(len(eng.grid.lon)),
+                       'acceptance': lookups.acceptance.value}, f, indent=2)
         logger.info(f"FieldFeatureCache saved to {cache_dir}")
 
     @classmethod
@@ -553,7 +568,8 @@ class FieldFeatureCache:
 
     @classmethod
     def load(cls, cache_dir: Path, mmap: bool = True, start_date: str | None = None,
-             end_date: str | None = None) -> 'FieldFeatureCache':
+             end_date: str | None = None,
+             acceptance: AcceptanceRule | str | None = None) -> 'FieldFeatureCache':
         """Load from disk, optionally restricted to a date range.
 
         Parameters
@@ -564,6 +580,8 @@ class FieldFeatureCache:
             Memory-map the field features (read-only).
         start_date, end_date : str or None
             Inclusive night bounds ('YYYY-MM-DD').
+        acceptance : AcceptanceRule, str, or None
+            Rule the caller expects the cache to be built with; None skips the check.
 
         Returns
         -------
@@ -573,6 +591,9 @@ class FieldFeatureCache:
         cache_dir = Path(cache_dir)
         with open(cache_dir / 'metadata.json') as f:
             meta = json.load(f)
+        accept_rule = AcceptanceRule(meta['acceptance'])
+        if acceptance is not None:
+            accept_rule.require(acceptance, cache_dir)
         t = np.load(cache_dir / 'transitions.npz')
         interruptions_path = cache_dir / cls.INTERRUPTIONS_FILE
         cache = cls(
@@ -583,7 +604,7 @@ class FieldFeatureCache:
             field_tiling=dict(np.load(cache_dir / cls.FIELD_TILING_FILE)),
             state_idxs=t['state_idxs'], current_state_idxs=t['current_state_idxs'],
             next_state_idxs=t['next_state_idxs'], slew_distances=t['slew_distances'],
-            interruptions=pd.read_parquet(interruptions_path) if interruptions_path.exists() else None,
+            acceptance=accept_rule, interruptions=pd.read_parquet(interruptions_path) if interruptions_path.exists() else None,
         )
         if start_date is not None or end_date is not None:
             all_nights = pd.to_datetime(cache.global_df['night'].unique())
@@ -628,5 +649,5 @@ class FieldFeatureCache:
             field_features=self.field_features[pos], field_feature_names=self.field_feature_names,
             field_tiling={k: v[pos] for k, v in self.field_tiling.items()},
             state_idxs=state_idxs, current_state_idxs=current_state_idxs, next_state_idxs=next_state_idxs,
-            slew_distances=slew, interruptions=self.interruptions,
+            slew_distances=slew, acceptance=self.acceptance, interruptions=self.interruptions,
         )

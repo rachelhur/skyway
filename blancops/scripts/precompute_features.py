@@ -16,7 +16,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from blancops.configs.paths import feature_cache_dir, field_feature_cache_dir, lookups_dir, workspace
+from blancops.configs.paths import feature_cache_dir, field_feature_cache_dir, lookups_dir, resolve_data_dir, workspace
 from blancops.data.feature_cache import FieldFeatureCache, BinFeatureCache
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.data.preprocessing import find_interruptions, load_and_process_historic_data, preprocess_fits
@@ -41,7 +41,7 @@ def get_args():
     )
     parser.add_argument(
         '--data_dir', type=str, default=workspace().des_data,
-        help='Data directory containing lookups and output dir for feature cache.'
+        help='Data directory containing lookups and output dir for feature cache (relative paths are under the workspace root).'
     )
     parser.add_argument(
         '--nside', type=int, default=16,
@@ -102,8 +102,9 @@ def main():
 
     fits_path = Path(args.fits_path)
     is_azel = 'azel' in args.action_space_type
-    lookup_dir = lookups_dir(args.data_dir)
-    outdir = feature_cache_dir(args.data_dir, args.nside, is_azel)
+    data_dir = resolve_data_dir(args.data_dir)
+    lookup_dir = lookups_dir(data_dir)
+    outdir = feature_cache_dir(data_dir, args.nside, is_azel)
 
     logger.info(f"Loading the full exposure archive from {fits_path}")
     archive_df = preprocess_fits(fits_path)
@@ -112,8 +113,8 @@ def main():
     logger.info(f"Found {len(interruptions)} survey exposures preceded by other archived exposures.")
 
     if args.field_features:
-        compute_field_cache(field_feature_cache_dir(args.data_dir), df, TrainLookupTables.load_from_dir(lookup_dir),
-                            interruptions)
+        field_dir = field_feature_cache_dir(data_dir)
+        compute_field_cache(field_dir, df, TrainLookupTables.load_from_dir(lookup_dir), interruptions)
         return
 
     if args.interruptions_only:

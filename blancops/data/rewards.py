@@ -38,6 +38,32 @@ def teff_reward(teff: np.ndarray) -> np.ndarray:
     return np.nan_to_num(teff, nan=0.0)
 
 
+NOMINAL_EXPTIME = 90.0  # seconds; one nominal DES wide-survey exposure
+
+
+def teff_accepted_reward(teff: np.ndarray, min_teff: np.ndarray, exptime: np.ndarray) -> np.ndarray:
+    """Accepted effective exposure time, in nominal exposures: R = (t_eff - t_min) * T_exp / 90 s.
+
+    Negative below the band's minimum accepted t_eff (an exposure the survey would reject), and
+    scaled by exposure time so a 45 s exposure earns half a 90 s one at the same t_eff.
+
+    Parameters
+    ----------
+    teff : np.ndarray
+        Effective exposure time ratio, shape (n_transitions,); NaN counts as 0.
+    min_teff : np.ndarray
+        Minimum accepted t_eff for each exposure's band, shape (n_transitions,).
+    exptime : np.ndarray
+        Exposure time in seconds, shape (n_transitions,).
+
+    Returns
+    -------
+    np.ndarray
+        Reward, shape (n_transitions,).
+    """
+    return (np.nan_to_num(teff, nan=0.0) - min_teff) * np.asarray(exptime, dtype=float) / NOMINAL_EXPTIME
+
+
 def slew_reward(excess_times: np.ndarray, decay_time: float = 10.0) -> np.ndarray:
     """Reward of 1 when the slew adds no dead time, decaying exponentially with the time it adds.
 
@@ -134,6 +160,7 @@ def uniformity_inputs(counts: np.ndarray, targets: np.ndarray, field_id: int, fi
 REWARD_TERMS: dict[RewardTerm, Callable[..., np.ndarray]] = {
     RewardTerm.EXPERT: expert_action_reward,
     RewardTerm.TEFF: teff_reward,
+    RewardTerm.TEFF_ACCEPTED: teff_accepted_reward,
     RewardTerm.SLEW: slew_reward,
     RewardTerm.UNIFORMITY: uniformity_reward,
 }

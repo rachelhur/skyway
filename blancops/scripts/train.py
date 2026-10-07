@@ -18,7 +18,7 @@ from blancops.plotting.training_viz import (
 )
 from blancops.rl.registry import build_algorithm
 from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate, resolve_and_save
-from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, workspace
+from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, resolve_data_dir, workspace
 from blancops.configs.enums import Algorithm, CheckpointMetric
 
 import argparse
@@ -35,8 +35,9 @@ def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-c', '--cfg', type=str, default=None, required=True,
                         help="Path to config file.")
-    parser.add_argument('--data_dir', type=str, default=str(workspace().des_data),
-                        help="Data directory containing lookups/ and the feature cache.")
+    parser.add_argument('--data_dir', type=str, default=None,
+                        help="Data directory containing lookups/ and the feature cache. "
+                             "Defaults to the config's data.data_dir; an override is recorded in the resolved config.")
     parser.add_argument('-l', '--logging_level', type=str, default='info',
                         help='Logging level.')
     parser.add_argument('--resume_from_checkpoint', action='store_true',
@@ -83,7 +84,10 @@ def main():
     device = get_system_device()
 
     # --- LOAD FEATURE CACHE --- #
-    data_dir = Path(args.data_dir)
+    if args.data_dir is not None:
+        cfg.data.data_dir = str(args.data_dir)
+    data_dir = resolve_data_dir(cfg.data.data_dir)
+    train_lookups = TrainLookupTables.load_from_dir(lookups_dir(data_dir), acceptance=cfg.data.acceptance)
     is_azel = grid_is_azel(cfg.data.action_space)
     field_level = is_field_level(cfg.data.action_space)
     cache_cls = FieldFeatureCache if field_level else BinFeatureCache
@@ -113,14 +117,15 @@ def main():
 
     logger.info(f"Loading feature cache from {cache_dir}")
     if field_level:
-        cache = FieldFeatureCache.load(cache_dir, mmap=True, start_date=cfg.data.start_date, end_date=cfg.data.end_date)
+        cache = FieldFeatureCache.load(cache_dir, mmap=True, start_date=cfg.data.start_date, end_date=cfg.data.end_date,
+                                       acceptance=cfg.data.acceptance)
     else:
         cache = BinFeatureCache.load(
             cache_dir, mmap_bin=True,
             start_date=cfg.data.start_date,
             end_date=cfg.data.end_date,
+            acceptance=cfg.data.acceptance,
         )
-    train_lookups = TrainLookupTables.load_from_dir(lookups_dir(data_dir))
 
     # --- CONSTRUCT TRAIN DATASET --- #
     train_dataset = TransitionDataset(
