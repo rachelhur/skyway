@@ -886,12 +886,7 @@ class MultiStepEvaluator(Evaluator):
 
         night_keys = [k for k in manifest if manifest[k] is not None]
 
-        # The manifest may store absolute paths from the training machine; the
-        # night CSV/npz files always live in <outdir>/nights with these
-        # basenames, so resolve by basename to stay portable across machines.
-        nights_dir = self.outdir / 'nights'
-        manifest = {k: (nights_dir / Path(v).name) if v is not None else None
-                    for k, v in manifest.items()}
+        manifest = self._local_manifest(manifest)
 
         # ---- Pass 1: scalars from per-night CSVs ----
         frames = []
