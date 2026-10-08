@@ -1,18 +1,19 @@
 # Training and Validation Models
 
-## Initialize the workspace
+## Workspace
 
-```bash
-workspace-init
-```
-
-This creates a `~/.blancops_profile` pointer and sets up the default configuration and data directories.
+Training data and runs live in a workspace: `$BLANCOPS_WORKSPACE` if set, otherwise the path in
+`~/.blancops_profile` if that file exists, otherwise `~/.blancops`. Relative data and run paths in configs are
+resolved against it.
 
 ## Training a Model
 
 ```bash
-# Generate training lookup tables
-build-train-lookups --fits_path <path/to/train/data/in/fits/format> --outdir <path/to/lookup/outdir>
+# Generate training lookup tables (written to <data dir>/lookups)
+build-train-lookups --fits_path <path/to/train/data/in/fits/format> -o <data dir> [--acceptance des_per_band]
+
+# Precompute the feature cache (once per data dir; add --field_features for field-level models)
+precompute-train-features --data_dir <data dir> [--field_features]
 
 # Run training
 run-train -c <path/to/config>
@@ -20,58 +21,37 @@ run-train -c <path/to/config>
 run-train --config <path/to/config>
 ```
 
-The training routine saves training results and best model in the following structure: 
-<!-- in the directory, `<config/specified/parent/dir>/run_<YYMMdd>_<HHmmss>` with the following structure: -->
+The training routine saves training results and the best model in
+`<config parent_dir>/<experiment_name>/run_<YYYYMMDD_HHMMSS>/`:
 
 ```
-├─ experiment_dir/
-│  ├─ run_<YYMMdd_HHMMSS>
-│     ├─ configs/
-│        ├─ checkpoint_epoch_<epoch_num>_metric_<metric_val>.pt
-│        ├─ checkpoint_history.json
-│        ├─ latest_checkpoint.pt
-│        ├─ model.pt
-│        ├─ normalization_stats.json
-│     ├─ metrics/
-│     ├─ checkpoints/
-│     ├─ logs/
-│     ├─ figures/
-checkpoint_epoch_030_metric_8.3777.pt  checkpoint_history.json  latest_checkpoint.pt  model.pt  normalization_stats.json
+run_<YYYYMMDD_HHMMSS>/
+├─ configs/
+│  ├─ resolved_config.yaml
+│  └─ split.json
+├─ checkpoints/
+│  ├─ checkpoint_epoch_<epoch_num>_metric_<metric_val>.pt
+│  ├─ checkpoint_history.json
+│  ├─ latest_checkpoint.pt
+│  ├─ model.pt
+│  └─ normalization_stats.json
+├─ metrics/
+├─ logs/
+└─ figures/
 ```
 
-- checkpoints
-   - 
-- configs
-- figures
-- logs
-- metrics
-
-<!-- There is a template train config file in `configs/template_train_config.json` -->
-<!-- 
 ## Running Validation/Evaluation
 
 ```bash
-# Validate a trained model
-run-validate -t <path/to/trained/model/dir> 
-# Run prediction/simulation
-run-simulate --model-dir deployable_models/bc_v0
-``` -->
+# Evaluate a trained model on its test (or validation) nights
+run-eval -c <run dir>/configs/resolved_config.yaml [--split val]
 
+# Compare several trained models
+run-model-compare -c <run dir 1>/configs/resolved_config.yaml <run dir 2>/configs/resolved_config.yaml
 
-<!-- ### CLI Entry Points
+# Feature-importance analysis
+run-explain --model_dir <run dir> [--sage] [--permutation]
+```
 
-All CLI commands are defined in `pyproject.toml` and map to functions in `blancops/scripts/`:
-
-| Command | Purpose |
-|---------|---------|
-| `workspace-init` | Initialize workspace configuration and data |
-| `construct-train-lookups` | Pre-compute training lookup tables |
-| `run-train` | Train an RL policy |
-| `run-validate` | Validate/evaluate a trained model |
-| `run-simulate` | Run prediction/simulation |
-| `run-live-scheduler` | Start the Live Scheduler |
-
-Alternatively, invoke directly:
-```bash
-python -m blancops.scripts.train --help
-``` -->
+To schedule future nights with a trained model, see the offline scheduler section of the
+[root README](../../README.md); pass `-m <run dir>` to `run-offline-scheduler`.

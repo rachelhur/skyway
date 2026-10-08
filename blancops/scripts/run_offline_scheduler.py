@@ -21,8 +21,10 @@ from blancops.io.logger_utils import configure_logger
 from blancops.utils.sys_utils import get_system_device
 from blancops.environment.offline_env import OfflineBlancoEnv, resolve_observing_windows
 from blancops.environment.field_mask_schedule import FieldMaskSchedule
+from blancops.ephemerides.time_utils import standardize_time
 
 import argparse
+import shutil
 from pathlib import Path
 
 
@@ -30,7 +32,7 @@ def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     # Model choice
-    parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1_nside32", help='Model alias or relative path to trained model directory')
+    parser.add_argument('-m', '--model_path_or_alias', type=str, default="cql_field", help='Model alias or relative path to trained model directory')
 
     # Fields
     fields_src = parser.add_mutually_exclusive_group(required=True)
@@ -48,18 +50,17 @@ def get_args():
                         help="Observing nights to schedule, one window each. Format YYYY-MM-DD-NIGHT where "
                              "NIGHT is one of 'full', 'half1', 'half2' (e.g. 2026-06-23-full). "
                              "Cannot be combined with --start_time / --stop_time.")
-    parser.add_argument('--start_time', type=float, default=None,
-                        help="Unix timestamp at which a single observing window starts. Without "
+    parser.add_argument('--start_time', type=str, default=None,
+                        help="Start of a single observing window: a UTC date and time such as 2026-11-04T01:30, "
+                             "a time with a UTC offset such as 2026-11-03T22:30-03:00, or unix seconds. Without "
                              "--stop_time the window ends at that night's sunrise. The window must lie "
                              "within one night, when the sun is below --sun_el_limit.")
-    parser.add_argument('--stop_time', type=float, default=None,
-                        help="Unix timestamp at which a single observing window stops. Without "
-                             "--start_time the window starts at that night's sunset.")
+    parser.add_argument('--stop_time', type=str, default=None,
+                        help="End of a single observing window, in the same formats as --start_time. Without "
+                             "--start_time the window starts at that night's sunset, when the sun is below --sun_el_limit.")
 
     # Observing script output
     parser.add_argument('-o', '--outdir', type=Path, required=True, help='Relative path to output directory')
-    parser.add_argument('--schedule_prefix', type=str, default='schedule',
-                        help='Base filename prefix for the generated schedule output')
     parser.add_argument('-s', '--save_observing_script', action='store_true',
                         help="Whether to save schedules as the telescope's observing script (SISPI JSON for Blanco).")
     parser.add_argument('--propid', type=str, default=None,
@@ -78,7 +79,9 @@ def get_args():
 
     # Logging
     parser.add_argument('-l', '--logging_level', type=str, default='info', choices=['info', 'debug', 'warning', 'error'], help='Logging level.')
-    parser.add_argument('--overwrite', action='store_true', help='Whether to overwrite existing schedule if already exists.')
+    parser.add_argument('-f', '--overwrite', action='store_true',
+                        help='Delete results of an earlier run in --outdir (nights/, observing_scripts/, plots/, '
+                             'rollout_info.pkl) before writing. Without it, an --outdir holding results is refused.')
     parser.add_argument('--seed', type=int, default=10, help='Random seed for schedule generation')
 
     # Scheduling parameters
@@ -133,6 +136,18 @@ def get_args():
     args = parser.parse_args()
     if args.save_observing_script and not args.propid:
         parser.error("--propid is required with --save_observing_script")
+    if args.save_observing_script and not args.program:
+        parser.error("--program is required with --save_observing_script")
+    earlier_results = [p for p in OfflineRunPaths(args.outdir).results if p.exists()]
+    if earlier_results and not args.overwrite:
+        parser.error(f"--outdir {args.outdir} already holds results ({', '.join(p.name for p in earlier_results)}); "
+                     f"pass --overwrite to replace them or choose another --outdir")
+    for name in ('start_time', 'stop_time'):
+        if getattr(args, name) is not None:
+            try:
+                setattr(args, name, standardize_time(getattr(args, name), strict=True))
+            except ValueError as e:
+                parser.error(f"--{name}: {e}")
     try:
         args.observing_windows = resolve_observing_windows(
             args.sun_el_limit, observing_nights=args.observing_nights,
@@ -146,6 +161,12 @@ def get_args():
 def main():
     # Parse args
     args = get_args()
+    if args.overwrite:
+        for path in OfflineRunPaths(args.outdir).results:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
 
     # ---------------------------------
     # SETUP LOGGER AND OUTDIR

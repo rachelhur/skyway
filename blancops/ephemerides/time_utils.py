@@ -1,5 +1,7 @@
+import re
+import warnings
 from datetime import datetime, timezone, timedelta
-from dateutil.parser import parse
+from dateutil.parser import UnknownTimezoneWarning, parse
 from pandas import Timedelta
 
 
@@ -122,7 +124,7 @@ def unix_to_local_datetime(ts):
     return unix_to_datetime(ts).astimezone()
 
 
-def standardize_time(t):
+def standardize_time(t, strict=False):
     """
     Ensures a time variable is in standard format: UNIX timestamp in UTC. Assumes that
     numerical inputs are already in correct format. Parses string inputs using dateutil
@@ -132,6 +134,10 @@ def standardize_time(t):
     ---------
     t: float, str, datetime
         Time variable to standardize.
+    strict: bool [False]
+        For strings, raise ValueError instead of guessing a time zone: reject 'UTC-3' /
+        'GMT-3' (dateutil reverses their sign) and abbreviations dateutil does not know
+        (it would assume UTC). Numeric offsets such as '-03:00' are accepted.
 
     Returns
     -------
@@ -152,7 +158,23 @@ def standardize_time(t):
     if isinstance(t, str):
         if is_number(t):
             return float(t)
-        dt = parse(t)
+        if not strict:
+            dt = parse(t)
+        else:
+            if re.search(r"(UTC|GMT)\s*[+-]", t, flags=re.IGNORECASE):
+                raise ValueError(
+                    f"{t!r}: write the UTC offset as a number, e.g. 2026-11-03T22:30-03:00 "
+                    f"('UTC-3' and 'GMT-3' are read with the opposite sign)"
+                )
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UnknownTimezoneWarning)
+                try:
+                    dt = parse(t)
+                except (ValueError, OverflowError, UnknownTimezoneWarning):
+                    raise ValueError(
+                        f"{t!r} is not a valid time; use a UTC date and time such as 2026-11-04T01:30, a time "
+                        f"with a numeric UTC offset such as 2026-11-03T22:30-03:00, or unix seconds"
+                    )
     elif isinstance(t, datetime):
         dt = t
     else:

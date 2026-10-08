@@ -1,0 +1,53 @@
+[
+    {
+        "object": "Field28_hpx233",
+        "seqnum": 1,
+        "seqtot": 1,
+        "seqid": "",
+        "expTime": 90,
+        "RA": 168.9066360935305,
+        "dec": -34.18159115927877,
+        "filter": "CaHK",
+        "count": 1,
+        "expType": "object",
+        "program": "magic-spring",
+        "wait": "False",
+        "propid": null,
+        "comment": "",
+        "proposer": "victorIA"
+    },
+    {
+        "object": "Field19_hpx232",
+        "seqnum": 1,
+        "seqtot": 1,
+        "seqid": "",
+        "expTime": 90,
+        "RA": 158.34716835474083,
+        "dec": -29.27867739660506,
+        "filter": "CaHK",
+        "count": 1,
+        "expType": "object",
+        "program": "magic-spring",
+        "wait": "False",
+        "propid": null,
+        "comment": "",
+        "proposer": "victorIA"
+    },
+    {
+        "object": "Field11_hpx231",
+        "seqnum": 1,
+        "seqtot": 1,
+        "seqid": "",
+        "expTime": 90,
+        "RA": 149.37913839585784,
+        "dec": -22.967105658829716,
+        "filter": "CaHK",
+        "count": 1,
+        "expType": "object",
+        "program": "magic-spring",
+        "wait": "False",
+        "propid": null,
+        "comment": "",
+        "proposer": "victorIA"
+    }
+]

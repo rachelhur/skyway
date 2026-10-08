@@ -78,12 +78,6 @@ class WorkspacePaths:
     def des_fits(self) -> Path:
         return self.des_data / "fits" / "decam-exposures-20251211.fits"
 
-    @property
-    def init_dirs(self) -> list[Path]:
-        """Directories created by workspace-init."""
-        return [self.root, self.configs, self.experiments, self.deployable_models,
-                self.train_data, self.test_suite]
-
 
 def workspace() -> WorkspacePaths:
     """Layout of the active workspace, resolved on each call.
@@ -381,3 +375,8 @@ class OfflineRunPaths:
     @property
     def log(self) -> Path:
         return self.root / self.LOG
+
+    @property
+    def results(self) -> list[Path]:
+        """Outputs of a rollout that `--overwrite` replaces; `lookups/` and the log are not included."""
+        return [self.nights, self.observing_scripts, self.plots, self.rollout_info]

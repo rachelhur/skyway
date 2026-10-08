@@ -190,6 +190,8 @@ def write_sispi(schedule_df: pd.DataFrame, name: str, save_dir: Path, lookups, *
     """
     if not propid:
         raise ValueError("A propid is required to write a SISPI file.")
+    if not program:
+        raise ValueError("A program is required to write a SISPI file.")
     timestamps = schedule_df['timestamp'].to_numpy(dtype=float)
     if (np.diff(timestamps) < 0).any():
         raise ValueError("SISPI schedule timestamps must be in time order.")
