@@ -5,7 +5,7 @@ import yaml
 from pathlib import Path
 
 # Import your domain-specific modules
-from blancops.configs.paths import RunPaths, workspace
+from blancops.configs.paths import PACKAGED_MODELS_DIR, RunPaths, workspace
 from blancops.configs.enums import Algorithm
 from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate
 from blancops.data.norm_stats import NormStats
@@ -27,7 +27,9 @@ class AgentFactory:
         """
         self.base_dir = Path(base_model_dir) if base_model_dir is not None else workspace().deployable_models
         self.alias_file = self.base_dir / "aliases.yml"
-        self.aliases = self._load_aliases()
+        self.aliases = self._load_aliases(self.alias_file)
+        self.packaged_alias_file = PACKAGED_MODELS_DIR / "aliases.yml"
+        self.packaged_aliases = self._load_aliases(self.packaged_alias_file)
 
     def build_agent(
         self,
@@ -131,22 +133,24 @@ class AgentFactory:
                     f"not match the policy architecture. {e}"
                 ) from e
 
-    def _load_aliases(self) -> dict:
-        if self.alias_file.exists():
-            with open(self.alias_file, 'r') as f:
+    @staticmethod
+    def _load_aliases(alias_file: Path) -> dict:
+        if alias_file.exists():
+            with open(alias_file, 'r') as f:
                 return yaml.safe_load(f) or {}
         return {}
 
     def resolve_model_dir(self, model_path_or_alias: str | Path) -> Path:
-        """Model run directory for an alias, a run directory path, or a directory name under `base_dir`.
+        """Model run directory for an alias, a run directory path, or a model directory name.
 
-        Order: alias in `aliases.yml` (-> base_dir/<target>), existing directory path (relative or
-        absolute), then base_dir/<name>.
+        Order: alias in `base_dir/aliases.yml`, existing directory path (relative or absolute),
+        `base_dir/<name>`, then the models shipped with the package (alias in
+        `PACKAGED_MODELS_DIR/aliases.yml`, then `PACKAGED_MODELS_DIR/<name>`).
 
         Parameters
         ----------
         model_path_or_alias : str or Path
-            Alias, run directory path, or directory name under `base_dir`.
+            Alias, run directory path, or model directory name.
 
         Returns
         -------
@@ -154,14 +158,18 @@ class AgentFactory:
             Existing model run directory.
         """
         key = str(model_path_or_alias)
+        candidates = []
         if key in self.aliases:
-            candidates = [self.base_dir / self.aliases[key]]
-        else:
-            candidates = [Path(key).expanduser(), self.base_dir / key]
+            candidates.append(self.base_dir / self.aliases[key])
+        candidates += [Path(key).expanduser(), self.base_dir / key]
+        if key in self.packaged_aliases:
+            candidates.append(PACKAGED_MODELS_DIR / self.packaged_aliases[key])
+        candidates.append(PACKAGED_MODELS_DIR / key)
         for path in candidates:
             if path.is_dir():
                 return path.resolve()
         raise FileNotFoundError(
             f"Model {key!r} not found; looked for {[str(p) for p in candidates]}. "
-            f"Aliases in {self.alias_file}: {sorted(self.aliases)}"
+            f"Aliases in {self.alias_file}: {sorted(self.aliases)}; "
+            f"packaged aliases: {sorted(self.packaged_aliases)}"
         )

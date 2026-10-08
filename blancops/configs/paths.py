@@ -178,6 +178,7 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 LIVE_SCHEDULER_DEFAULT_CONFIG = PACKAGE_DIR / "configs" / "live_scheduler_default.yaml"
 DECAM_SKY_CONFIG = PACKAGE_DIR / "blanco" / "decam_sky.conf"
 CONFIG_TEMPLATES_DIR = PACKAGE_DIR / "configs" / "templates"
+PACKAGED_MODELS_DIR = PACKAGE_DIR / "models"
 
 
 def config_template(algorithm: str) -> Path:
