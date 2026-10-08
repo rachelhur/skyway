@@ -1,15 +1,20 @@
+from __future__ import annotations
+
 import datetime
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator, ValidationInfo
+# XXX remove all uses of AliasChoices after confirming deployed model
+# can be re-run with identical output
+from pydantic import AliasChoices, BaseModel, Field, computed_field, field_validator, model_validator, ValidationInfo
 import yaml
 from pathlib import Path
 from typing import Any, List, Union, Literal, Dict
 import numpy as np
 from typing import Optional
 from blancops.configs.enums import *
-from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, DES_FITS_PATH, _BIN_FEATURES
-from blancops.configs.constants import FILTER2IDX
+from blancops.configs.constants import _DEFAULT_NORM_MAPPING, _FILTER_DEP_FEATURE_NAMES, _BIN_FEATURES, _FIELD_FEATURES
+from blancops.configs.paths import RunPaths, workspace
 from blancops.configs.constants import _ALLOWED_NORMS_PER_FEATURE, _NORM_TYPES
 from blancops.survey.profiles import DES
+from blancops.data.splits import NightSplit
 
 class ActionConstraints(BaseModel):
     sun_el_limit: float = DES.sun_el_limit
@@ -33,8 +38,8 @@ class ActionConstraints(BaseModel):
 
         if v <= 1.0:
             raise ValueError('airmass limit should be > 1.0 (minimum airmass at zenith)')
-        if v > 10.0:
-            raise ValueError('airmass limit should be <= 10.0 (extremely high airmass)')
+        if v > 3.0:
+            raise ValueError('airmass limit should be <= 3.0 (extremely high airmass)')
         return v
 
 class NormalizationConfig(BaseModel):
@@ -77,25 +82,27 @@ class NormalizationConfig(BaseModel):
 class SeeingConfig(BaseModel):
     """Parameters for the Seeing rolling-history predictor.
 
-    Shared by the offline causal-fwhm feature builder, the historic
-    validation env, and the live env so train and serve agree. Instrument
-    components are in arcsec and converted to native angle units when a
-    Seeing instance is built.
+    Shared by the offline fwhm feature builder, the historic
+    validation env, and the live env.
     """
     window: str = "15m"
     retention_window: Optional[str] = None
-    from_instrument: float = 0.5
-    to_instrument: float = 0.5
+    from_instrument: float = 0.5 # arcsec
+    to_instrument: float = 0.5 # arcsec
 
 
 class BaseDataConfig(BaseModel):
     name: str = 'des-data-v0'
-    path: str = str(DES_FITS_PATH)
+    path: str = Field(default_factory=lambda: str(workspace().des_fits))
     # cache_in_memory: bool = False
 
     # Data configuration
     nside: int = 16
     action_space: str
+    # Folder holding this run's lookups and feature caches
+    data_dir: str = Field(default_factory=lambda: str(workspace().des_data))
+    # Which exposures count toward the survey: one 0.3 threshold, or DES's per-band minimum teff
+    acceptance: AcceptanceRule = AcceptanceRule.UNIFORM
 
     # Normalization configuration
     norm: NormalizationConfig = Field(default_factory=NormalizationConfig)
@@ -105,25 +112,41 @@ class BaseDataConfig(BaseModel):
 
     # Configurations calculated after data processing (required for model instantiation)
     state_dim: Optional[int] = None
-    bin_state_dim: Optional[int] = None
-    num_bins: Optional[int] = None
+    # Candidates are HEALPix bins, or survey fields for field_filter; old configs use the bin_* keys
+    candidate_state_dim: Optional[int] = Field(
+        default=None, validation_alias=AliasChoices('candidate_state_dim', 'bin_state_dim'))
+    num_candidates: Optional[int] = Field(
+        default=None, validation_alias=AliasChoices('num_candidates', 'num_bins'))
     num_filters: Optional[int] = None
     num_actions: Optional[int] = None
 
     # Features
     global_features: List[str]
-    bin_features: List[str]
+    bin_features: List[str] = []
+    field_features: List[str] = []
 
     @model_validator(mode='after')
     def validate_features(self) -> 'TrainDataConfig':
         for bin_feat in self.bin_features:
             if bin_feat not in _BIN_FEATURES:
                 raise ValueError(f"{bin_feat} is not implemented.")
+        for field_feat in self.field_features:
+            if field_feat not in _FIELD_FEATURES:
+                raise ValueError(f"{field_feat} is not an implemented field feature.")
+        if is_field_level(self.action_space):
+            if self.bin_features:
+                raise ValueError("action_space 'field_filter' uses field_features; bin_features must be empty.")
+            if not self.field_features:
+                raise ValueError("action_space 'field_filter' requires field_features.")
+        elif self.field_features:
+            raise ValueError(f"field_features require action_space 'field_filter', got '{self.action_space}'.")
         return self
 
     @model_validator(mode='after')
     def validate_action_space_consistency(self) -> 'TrainDataConfig':
         # Validate that action_space is consistent with features
+        if self.action_space not in {a.value for a in ActionSpace}:
+            raise ValueError(f"Unknown action_space '{self.action_space}'.")
         has_filter = 'filter' in self.action_space
         has_radec = 'radec' in self.action_space
         has_azel = 'azel' in self.action_space
@@ -141,7 +164,7 @@ class BaseDataConfig(BaseModel):
                 pass
         else:
             # If no filter in action space, we shouldn't have filter-specific features
-            filter_features = [f for f in self.global_features + self.bin_features
+            filter_features = [f for f in self.global_features + self.bin_features + self.field_features
                              if any(filter_str in f for filter_str in _FILTER_DEP_FEATURE_NAMES)]
             if filter_features:
                 raise ValueError(f"Filter-specific features {filter_features} found but action_space '{self.action_space}' does not include 'filter'")
@@ -149,17 +172,35 @@ class BaseDataConfig(BaseModel):
         return self
 
 class TrainDataConfig(BaseDataConfig):
+    # Drop transitions interrupted by other archived exposures (needs the cache's interruptions file)
+    drop_interrupted: bool = True
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     years: List[int] = [2013, 2014, 2015, 2016, 2017, 2018, 2019] # All years of DES
     months: List[int] = [i+1 for i in range(12)]
     days: List[int] = [i+1 for i in range(31)]
-    filters: List[str] = [filt for filt in FILTER2IDX.keys()]
+    filters: List[str] = Field(default_factory=lambda: list(DES.filters))
 
-    # Configurations required for validation
-    train_nights: Optional[List[str]] = None
+    # Split specification: each of val and test is either an explicit night
+    # list or a fraction of the total night count. Explicit lists win.
     val_nights: Optional[List[str]] = None
-    train_val_split: float  = 0.9
+    val_frac: Optional[float] = None
+    test_nights: Optional[List[str]] = None
+    test_frac: Optional[float] = None
+    train_val_split: float = 0.9  # deprecated; feeds val_frac when val_frac is None
+
+    # Drop transitions whose exposure has teff <= min_teff (e.g. 0.3 for BC); None keeps all
+    min_teff: Optional[float] = None
+
+    @field_validator('start_date', 'end_date', 'val_nights', 'test_nights', mode='before')
+    @classmethod
+    def dates_to_iso_strings(cls, v):
+        """Convert YAML-parsed dates (unquoted YYYY-MM-DD) to 'YYYY-MM-DD' strings."""
+        if isinstance(v, datetime.date):
+            return v.isoformat()[:10]
+        if isinstance(v, list):
+            return [d.isoformat()[:10] if isinstance(d, datetime.date) else d for d in v]
+        return v
 
     @field_validator('train_val_split')
     @classmethod
@@ -167,6 +208,34 @@ class TrainDataConfig(BaseDataConfig):
         if not 0 < v < 1:
             raise ValueError('train_val_split must be between 0 and 1 exclusive')
         return v
+
+    @field_validator('val_frac', 'test_frac')
+    @classmethod
+    def validate_split_frac(cls, v):
+        if v is not None and not 0 < v < 1:
+            raise ValueError('split fractions must be between 0 and 1 exclusive')
+        return v
+
+    @model_validator(mode='after')
+    def validate_split_fracs_sum(self) -> 'TrainDataConfig':
+        total = (self.val_frac or 0.0) + (self.test_frac or 0.0)
+        if total >= 1:
+            raise ValueError(f'val_frac + test_frac must be < 1, got {total}')
+        return self
+
+    @property
+    def effective_val_frac(self) -> Optional[float]:
+        """Validation fraction actually used, falling back to the deprecated
+        ``train_val_split`` when neither ``val_nights`` nor ``val_frac`` is set.
+
+        Returns:
+            The fraction, or None when explicit val nights are supplied.
+        """
+        if self.val_nights:
+            return None
+        if self.val_frac is not None:
+            return self.val_frac
+        return 1.0 - self.train_val_split
 
     @field_validator('years', 'months', 'days', 'filters')
     @classmethod
@@ -180,7 +249,7 @@ class BaseAlgConfig(BaseModel):
     loss_strategy: ActionArchitecture = ActionArchitecture.PURE_JOINT
     hidden_dim: int = 128
     nlayers: int = 4
-    loss_function: str
+    loss_function: LossFunction
     contextual_gating: bool = False
     activation: str = "relu"
     global_enc_dim: Optional[int] = 128
@@ -230,16 +299,29 @@ class BaseAlgConfig(BaseModel):
             raise ValueError(f"activation must be one of {valid_activations}, got {self.activation}")
         return self
 
-class RewardWeights(BaseModel):
-    w_slew: float = 1.0
-    w_airmass: float = 1.0
-    w_t_last_visit: float = 1.0
-    w_min_tiling: float = 1.0
-    airmass_limit: float = 3.0
-    t_ref_seconds: float = 60*60*12
+class RewardConfig(BaseModel):
+    terms: dict[RewardTerm, float] = Field(
+        default_factory=lambda: {RewardTerm.TEFF: 1.0}, min_length=1
+    )
+    norm: Literal['minmax'] | None = 'minmax'  # keys of data.rewards.REWARD_NORMS
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_terms(cls, v: Any) -> Any:
+        return {"terms": {v: 1.0}} if isinstance(v, str) else v
+
+    # w_slew: float = 1.0
+    # w_airmass: float = 1.0
+    # w_t_last_visit: float = 1.0
+    # w_min_tiling: float = 1.0
+    # airmass_limit: float = 3.0
+    # t_ref_seconds: float = 60*60*12
+
 
 class BCAlgConfig(BaseAlgConfig):
     algorithm: Literal[Algorithm.BC]
+    loss_function: Literal[LossFunction.CROSS_ENTROPY, LossFunction.FOCAL_LOSS,
+                           LossFunction.FOCAL_LOSS_FILTER, LossFunction.FOCAL_LOSS_SLEW]
 
     # Loss function knobs (used by some strategies, ignored by others)
     reduction: str = "mean"
@@ -250,11 +332,10 @@ class BCAlgConfig(BaseAlgConfig):
     filter_penalty: float | None = None
 
     # Hybrid-marginal weights
-    alpha_bin: float | None = None
+    alpha_candidate: float | None = Field(
+        default=None, validation_alias=AliasChoices('alpha_candidate', 'alpha_bin'))
     beta_filter: float | None = None
     zeta_joint: float | None = None
-    reward: RewardStructure | None = None
-    reward_weights: RewardWeights = Field(default_factory=RewardWeights)
 
     @model_validator(mode="after")
     def validate_strategy_requirements(self) -> "BCAlgConfig":
@@ -273,39 +354,37 @@ class BCAlgConfig(BaseAlgConfig):
             raise ValueError('gamma_focal must be positive')
         return v
 
-    @field_validator('filter_penalty', 'alpha_bin', 'beta_filter', 'zeta_joint')
+    @field_validator('filter_penalty', 'alpha_candidate', 'beta_filter', 'zeta_joint')
     @classmethod
     def validate_optional_float(cls, v):
         if v is not None and v < 0:
             raise ValueError('Value must be non-negative')
         return v
 
-class DDQNAlgConfig(BaseAlgConfig):
-    algorithm: Literal[Algorithm.DDQN]
-    reward: RewardStructure = RewardStructure.TEFF
-    reward_weights: RewardWeights = Field(default_factory=RewardWeights)
-    reward_norm: str = 'minmax'
-    tau: float = 0.005 # DDQN specific parameter
-    gamma: float = 0.99 # DDQN specific parameter
+class RLAlgConfig(BaseAlgConfig):
+    loss_function: Literal[LossFunction.HUBER, LossFunction.MSE]
+    reward: RewardConfig = Field(default_factory=RewardConfig)
+    gamma: float = 0.99
+    tau: float = 0.005
 
     @field_validator('tau')
     @classmethod
     def validate_tau(cls, v):
         if not 0 < v <= 1:
-            raise ValueError('tau must be between 0 and 1 exclusive')
+            raise ValueError('tau must be in (0, 1]')
         return v
 
     @field_validator('gamma')
     @classmethod
     def validate_gamma(cls, v):
         if not 0 <= v <= 1:
-            raise ValueError('gamma must be between 0 and 1 inclusive')
+            raise ValueError('gamma must be in [0, 1]')
         return v
 
-    @model_validator(mode="after")
-    def validate_reward(self) -> "DDQNAlgConfig":
-        assert self.reward in RewardStructure, f"Reward structure {self.reward} is not supported."
-        return self
+
+class DDQNAlgConfig(RLAlgConfig):
+    algorithm: Literal[Algorithm.DDQN]
+
 
 class CQLAlgConfig(DDQNAlgConfig):
     algorithm: Literal[Algorithm.CQL]
@@ -319,7 +398,14 @@ class CQLAlgConfig(DDQNAlgConfig):
             raise ValueError('cql_alpha must be positive')
         return v
 
-class IQLAlgConfig(DDQNAlgConfig):
+    @model_validator(mode="after")
+    def validate_reward_bounded(self) -> "CQLAlgConfig":
+        if self.reward.norm != 'minmax':
+            raise ValueError("CQL assumes rewards in [0,1]")
+        return self
+
+
+class IQLAlgConfig(RLAlgConfig):
     algorithm: Literal[Algorithm.IQL]
     expectile: float = 0.7
     awr_beta: float = 3.0
@@ -359,6 +445,7 @@ class TrainConfig(BaseModel):
     lr_sched_epoch_start: int = 10
     lr_sched_epoch_duration: int = 30
     patience: int = 20
+    save_every_n_epochs: int = 3     # keep weights every N epochs in addition to the top-k; 0 disables
     device:         str   = "cuda"
     seed:           int   = 42
 
@@ -391,7 +478,7 @@ class TrainConfig(BaseModel):
             raise ValueError('learning rate should be <= 1.0')
         return v
 
-    @field_validator('lr_sched_epoch_start', 'lr_sched_epoch_duration')
+    @field_validator('lr_sched_epoch_start', 'lr_sched_epoch_duration', 'save_every_n_epochs')
     @classmethod
     def validate_non_negative(cls, v):
         if v < 0:
@@ -453,14 +540,17 @@ class ExperimentConfig(BaseModel):
     @model_validator(mode='before')
     @classmethod
     def set_outdir(cls, data: Any) -> Any:
-        """Intercepts the raw dictionary to compute outdir before validation."""
+        """Intercepts the raw dictionary to compute outdir before validation.
+
+        A relative parent_dir is resolved against the workspace; an absolute one is used as-is.
+        """
         if isinstance(data, dict) and data.get('outdir') is None:
             exp_name = data.get('experiment_name')
-            parent = data.get('parent_dir', 'experiments/')
+            parent = workspace().root / data.get('parent_dir', 'experiments/')
 
             if exp_name:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                data['outdir'] = str(Path(parent) / exp_name / f"run_{timestamp}")
+                data['outdir'] = str(parent / exp_name / f"run_{timestamp}")
                 # data['outdir'] = str(Path(parent) / exp_name)
 
         return data # Return the modified dictionary
@@ -476,6 +566,11 @@ class ExperimentConfig(BaseModel):
                 f"action_space=FILTER only supports loss_strategy=PURE_JOINT, "
                 f"got {self.model.loss_strategy}"
             )
+        if is_field_level(self.data.action_space) and (
+            is_autoregressive(self.model.network)
+            or self.model.loss_strategy == ActionArchitecture.AUTOREGRESSIVE
+        ):
+            raise ValueError("action_space 'field_filter' does not support autoregressive networks or losses.")
         return self
 
     @model_validator(mode='after')
@@ -496,18 +591,19 @@ def load_and_validate(yaml_path: str | Path) -> ExperimentConfig:
     cfg.orig_cfg_path = str(Path(yaml_path).resolve())
     return cfg
 
-def resolve_and_save(cfg: ExperimentConfig, dataset_dims: dict, dataset_feature_names: dict, lr_scheduler_kwargs: dict, val_nights: List[str], outdir: str | Path) -> ExperimentConfig:
+def resolve_and_save(cfg: ExperimentConfig, dataset_dims: dict, dataset_feature_names: dict, lr_scheduler_kwargs: dict, night_split: NightSplit, outdir: str | Path) -> ExperimentConfig:
     """Resolves config by filling in fields calculated after data processing. Saves the resolved config to the output directory."""
     # UPDATE CONFIG.DATA
     data_updates = {
         "state_dim": int(dataset_dims['state_dim']),
-        "bin_state_dim": int(dataset_dims['bin_state_dim']),
-        "num_bins": int(dataset_dims['num_bins']),
+        "candidate_state_dim": int(dataset_dims['candidate_state_dim']),
+        "num_candidates": int(dataset_dims['num_candidates']),
         "num_filters": int(dataset_dims['num_filters']),
         "num_actions": int(dataset_dims['num_actions']),
         # "global_features": dataset_feature_names['global_features'],
         # "bin_features": dataset_feature_names['bin_features'],
-        "val_nights": val_nights
+        "val_nights": list(night_split.val),
+        "test_nights": list(night_split.test),
     }
     updated_data = cfg.data.model_copy(update=data_updates)
     # UPDATE CONFIG.TRAIN
@@ -523,8 +619,9 @@ def resolve_and_save(cfg: ExperimentConfig, dataset_dims: dict, dataset_feature_
     # CONSTRUCT EXPERIMENT_OUTDIR CONFIG FIELD AND SAVE RESOLVED CONFIG
     if resolved_cfg.outdir is None:
         resolved_cfg.outdir = str(Path(resolved_cfg.outdir))
-    Path(Path(resolved_cfg.outdir) / "configs" ).mkdir(parents=True, exist_ok=True)
-    with open(Path(resolved_cfg.outdir) / "configs" /"resolved_config.yaml", "w") as f:
+    run_paths = RunPaths(resolved_cfg.outdir)
+    run_paths.configs.mkdir(parents=True, exist_ok=True)
+    with open(run_paths.resolved_config, "w") as f:
         # Use mode='json' to force Pydantic to convert complex types (like Enums) to strings
         resolved_dict = resolved_cfg.model_dump(mode='json')
         # print('DUMPING RESOLVED CONFIG IN ', f)

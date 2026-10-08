@@ -1,4 +1,4 @@
-from blancops.configs.rl_schema import ActionConstraints
+from blancops.configs.experiment_schema import ActionConstraints
 from blancops.environment.live_env import LiveBlancoEnv
 
 import numpy as np
@@ -10,14 +10,11 @@ from blancops.math import units
 
 def build_env(cfg, norm_stats, lookups, telemetry_now):
     constraints_cfg = ActionConstraints()
-    zscore_stats = norm_stats.get('z_score', {})
-    rel_norm_stats = norm_stats.get('rel_norm', {})
     env = LiveBlancoEnv(
         cfg=cfg,
         constraints_cfg=constraints_cfg,
         lookups=lookups,
-        z_score_stats=zscore_stats, 
-        rel_norm_stats=rel_norm_stats,
+        norm_stats=norm_stats,
         telemetry_init=telemetry_now
     )
     return env
@@ -49,7 +46,7 @@ def get_visible_targets(
     require : {"any","all"}
         "any" returns fields observable at some point in the window (the union you
         asked for); "all" returns fields observable for the entire window.
- 
+
     Returns
     -------
     valid_ra, valid_dec : np.ndarray (deg)
@@ -68,20 +65,20 @@ def get_visible_targets(
         ra_deg = np.degrees(target_radecs[:, 0])   # rad -> deg, unambiguous
         dec_deg = np.degrees(target_radecs[:, 1])
         out_shape = None
- 
+
     # --- sample the window ---
     t0 = Time(obs_window_utc[0], scale="utc")
     t1 = Time(obs_window_utc[1], scale="utc")
     n_steps = max(2, int(np.ceil((t1 - t0).to_value(au.min) / step_minutes)) + 1)
     times = t0 + np.linspace(0, (t1 - t0).to_value(au.min), n_steps) * au.min
- 
+
     elevation_limit = np.degrees(np.arcsin(1.0 / airmass_limit))   # deg, = 50.3 for am=1.3
     alt = _alt_deg(ra_deg, dec_deg, times, loc=site)               # (n_fields, n_times)
     up = alt > elevation_limit
     frac = up.mean(axis=1)
- 
+
     mask = up.any(axis=1) if require == "any" else up.all(axis=1)
- 
+
     valid_ra = ra_deg[mask]
     valid_dec = dec_deg[mask]
     return valid_ra, valid_dec, frac[mask]

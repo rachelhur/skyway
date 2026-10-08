@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from blancops.configs.constants import FILTER2IDX
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.data.features.glob_features import get_night_boundaries
 
 import logging
@@ -77,7 +77,7 @@ def build_synthetic_obs_history(
 
     targets = lookups.target_fidfilt_counts            # (nfields, nfilters)
     field_ids = lookups.fields.index.to_numpy()
-    idx2filter = {idx: name for name, idx in FILTER2IDX.items()}
+    idx2filter = lookups.survey.idx2filter
 
     if not visits_by_propid:
         raise ValueError("visits_by_propid is required and must be non-empty.")
@@ -134,10 +134,9 @@ def build_synthetic_obs_history(
         )
     return pd.DataFrame(records, columns=["field_id", "filter", "timestamp"])
 
-
-# Candidate column names across the two supported formats. Schedule CSVs use the
-# agent_* names from io.schedule_io.SCHEDULE_KEYS; live JSONL logs use the bare
-# proposal-row names emitted by live_scheduler.model_runner.
+# XXX will remove this pre-fix dependence after validating new model
+# Candidate column names: schedule CSVs from older runs use agent_* names; current
+# schedule CSVs and live JSONL logs (live_scheduler.model_runner) use the bare names.
 _FIELD_ID_COLS = ("agent_field_id", "field_id")
 _TIMESTAMP_COLS = ("agent_timestamp", "timestamp")
 _FILTER_IDX_COLS = ("agent_filter_idx", "filter_idx")
@@ -174,7 +173,7 @@ def _read_obs_history(path: Path) -> pd.DataFrame:
     )
 
 
-def _normalize(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize(df: pd.DataFrame, survey: SurveyProfile = DES) -> pd.DataFrame:
     """Reduce a raw history frame to columns: field_id, filt_idx, timestamp, night."""
     if df.empty:
         raise ValueError("Observation history is empty.")
@@ -185,13 +184,13 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     field_id = df[field_col].to_numpy(dtype=np.int64)
     timestamp = df[ts_col].to_numpy(dtype=np.float64)
 
-    # Filter index may be stored directly (CSV) or as a name needing FILTER2IDX.
+    # Filter index may be stored directly (CSV) or as a name needing the survey's filter2idx.
     idx_col = next((c for c in _FILTER_IDX_COLS if c in df.columns), None)
     if idx_col is not None:
         filt_idx = df[idx_col].to_numpy(dtype=np.int64)
     else:
         name_col = _first_present(df, _FILTER_NAME_COLS, "filter")
-        mapped = df[name_col].map(FILTER2IDX)
+        mapped = df[name_col].map(survey.filter2idx)
         if mapped.isna().any():
             bad = sorted(set(df[name_col][mapped.isna()]))
             raise ValueError(f"Unrecognized filter name(s) in history: {bad}.")
@@ -221,7 +220,7 @@ def load_seed_state_from_obs_history(path, lookups, sun_el_limit):
         per-night accumulation in blancops/data/preprocessing.py.
     """
     path = Path(path)
-    df = _normalize(_read_obs_history(path))
+    df = _normalize(_read_obs_history(path), lookups.survey)
 
     n_fields, n_filters = lookups.target_fidfilt_counts.shape
     counts = np.zeros((n_fields, n_filters), dtype=np.int64)

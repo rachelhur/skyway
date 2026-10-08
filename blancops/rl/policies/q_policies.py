@@ -17,8 +17,8 @@ class QFlatPolicy(QPolicyBase):
         self.core_net = core_net
         self.num_filters = num_filters
 
-    def get_q_values(self, x_glob, x_bin) -> torch.Tensor:
-        return self.core_net(x_glob=x_glob, x_bin=x_bin)
+    def get_q_values(self, x_glob, x_cand) -> torch.Tensor:
+        return self.core_net(x_glob=x_glob, x_cand=x_cand)
     
 
 class QAutoregressivePolicy(QPolicyBase):
@@ -35,8 +35,8 @@ class QAutoregressivePolicy(QPolicyBase):
         self._filt_idx = core_ar_net._filt_idx
         self._bin_idx = core_ar_net._bin_idx
 
-    def get_q_values(self, x_glob, x_bin) -> torch.Tensor:
-        x_latent = self.core_net.state_encoder(x_glob, x_bin)
+    def get_q_values(self, x_glob, x_cand) -> torch.Tensor:
+        x_latent = self.core_net.state_encoder(x_glob, x_cand)
         batch_size = x_latent.size(0)
 
         # First head: Q over the first action dim.

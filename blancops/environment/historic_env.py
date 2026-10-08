@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from typing import Optional
- 
+
 import numpy as np
- 
+
 from blancops.environment.base import StateSnapshot
 from blancops.environment.seeing_model import PredictiveSeeingModel
 from blancops.data.features.glob_features import get_night_boundaries
-from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER
- 
+from blancops.configs.constants import ZENITH_BIN_NUM, ZENITH_FIELD_ID, ZENITH_FILTER_IDX
+from blancops.survey.profiles import DES
+
 import logging
 
 from blancops.environment.offline_base import BaseBlancoOfflineEnv
@@ -17,40 +18,46 @@ logger = logging.getLogger(__name__)
 
 class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     """Validation against historically observed nights.
- 
+
     Driven by a pandas groupby keyed on night. Each night's initial visit
     state comes from `lookups.night2fidfilt_visit_hist[night_id]` (full-survey
     seeded); per-night seeing splines are passed at construction for the
     fwhm feature hook.
 
     Survey-position context (``_survey_night_idx`` and ``_get_survey_nights_total``)
-    is now derived from ``lookups.night2idx`` and ``lookups.total_nights``,
+    now derived from ``lookups.night2idx`` and ``lookups.total_nights``,
     """
- 
+
     def __init__(
         self,
         *,
         cfg,
         constraints_cfg,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats,
         global_pd_nightgroup,
-        night_start_bin_states: Optional[np.ndarray] = None,
+        night_start_candidate_states: Optional[np.ndarray] = None,
         telescope=None,
+        survey=DES,
+        zenith_start: bool = False,
+        replay_mode: bool = False,
     ):
         super().__init__(
             cfg=cfg,
             constraints_cfg=constraints_cfg,
             lookups=lookups,
-            z_score_stats=z_score_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=norm_stats,
             telescope=telescope,
+            survey=survey,
             max_nights=global_pd_nightgroup.ngroups,
         )
         self._groupbynight = global_pd_nightgroup
         self._night_keys = list(global_pd_nightgroup.groups.keys())
-        self._night_start_bin_states = night_start_bin_states
+        self._night_start_candidate_states = night_start_candidate_states
+        # zenith_start: each night starts parked at zenith at its first row's time (the dataset's zenith row),
+        # instead of at the expert's first field. replay_mode: accept expert commands outside the mask.
+        self._zenith_start = zenith_start
+        self._replay_mode = replay_mode
 
         # Per-night feature context.
         self._survey_night_idx = 0  # set per-night in _get_night_config
@@ -58,7 +65,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         # Seeing predictor. A model is required at construction so feature
         # validation passes; _start_new_night rebuilds it from each night's
         # measurements. Empty until then (predict falls back to nominal).
-        if "fwhm" in self.global_feature_names:
+        if self._needs_seeing_model():
             self._seeing_model = PredictiveSeeingModel(self.cfg.data.seeing)
 
         # Guard rails: features that need full-survey context cannot be
@@ -76,7 +83,11 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
     # -----------------------------------------------------------------------
     # OfflineBlancoEnv hooks
     # -----------------------------------------------------------------------
- 
+
+    def night_label(self, night_idx: int) -> str:
+        """The night's evening date, e.g. '2017-08-15'."""
+        return str(self._night_keys[night_idx])
+
     def _get_night_config(self, night_idx: int) -> dict:
         """Build the per-night timing/seed config.
 
@@ -104,9 +115,12 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             # survey-position features.
             self._survey_night_idx = night_idx
 
-        field_id = int(first_row["field_id"])
-        filter_idx = int(first_row["filter_idx"])
-        bin_num = int(first_row["bin"])
+        if self._zenith_start:
+            field_id, filter_idx, bin_num = ZENITH_FIELD_ID, ZENITH_FILTER_IDX, ZENITH_BIN_NUM
+        else:
+            field_id = int(first_row["field_id"])
+            filter_idx = int(first_row["filter_idx"])
+            bin_num = int(first_row["bin"])
 
         night2ot = self.lookups.night2ot_clock_seconds
         if night2ot is None:
@@ -120,19 +134,21 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
             "end_ts":     last_row["timestamp"],
             "sunset_ts":  sunset_ts,
             "sunrise_ts": sunrise_ts,
-            "ot_at_sunset": int(night2ot[first_row["night"]]),
+            # Field runs keep the exact OT clock value, as the offline features do.
+            "ot_at_sunset": (float(night2ot[first_row["night"]]) if self.field_level
+                             else int(night2ot[first_row["night"]])),
             "field_id":   field_id,
             "filter_idx": filter_idx,
             "bin_num":    bin_num,
         }
 
- 
+
     def _build_night_start_snapshot(self, night_idx: int) -> StateSnapshot:
         night_id = self._night_keys[night_idx]
         night_cfg = self._get_night_config(night_idx)
 
-        if self._night_start_bin_states is not None and self.include_bin_features:
-            self._bin_state = self._night_start_bin_states[night_idx]
+        if self._night_start_candidate_states is not None and self.include_candidate_features:
+            self._candidate_state = self._night_start_candidate_states[night_idx]
 
         counts_lookup = (
             self.lookups.night2fidfilt_visit_hist
@@ -183,20 +199,21 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
         and the agent's pointing (band/el) is honored per query via the base
         _get_fwhm delegate.
 
-        No-op when the config does not request the fwhm feature: leaving
+        No-op when neither the fwhm feature nor the teff reward needs it: leaving
         `_seeing_model` as None keeps `_get_fwhm` a no-op and avoids the
         predictor's empty-history fallback warning.
         """
-        if "fwhm" not in self.global_feature_names:
+        if not self._needs_seeing_model():
             return
         night_key = self._night_keys[self._night_idx]
         night_df = self._groupbynight.get_group(night_key)
         model = PredictiveSeeingModel(self.cfg.data.seeing)
         fwhm_vals = night_df['fwhm'].to_numpy(dtype=float)
-        valid = ~np.isnan(fwhm_vals)
+        # Zenith rows are start states, not exposures: they carry no measurement.
+        valid = ~np.isnan(fwhm_vals) & (night_df['field_id'].to_numpy() != ZENITH_FIELD_ID)
         if valid.any():
             filt = night_df['filter_idx'].to_numpy()[valid]
-            bands = [IDX2FILTER.get(int(f), FWHM_REF_FILTER) for f in filt]
+            bands = [self.idx2filter.get(int(f), self._survey.seeing_ref_filter) for f in filt]
             model.add(
                 date=night_df['timestamp'].to_numpy(dtype=float)[valid],
                 seeing=fwhm_vals[valid],
@@ -207,8 +224,7 @@ class HistoricBlancoEnv(BaseBlancoOfflineEnv):
 
     def _get_survey_nights_total(self) -> Optional[int]:
         return self.lookups.total_nights
- 
+
     def _get_survey_night_idx(self) -> Optional[int]:
         return self._survey_night_idx
 
-            

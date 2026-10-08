@@ -2,10 +2,11 @@ import argparse
 import numpy as np
 from pathlib import Path
 from blancops.data.preprocessing import build_DES_lookups
+from blancops.data.lookup_tables import TrainLookupTables
 from blancops.math import units
 
-from blancops.configs.constants import DES_DATA_DIR, DES_FITS_PATH
-from blancops.configs.constants import FILTER2IDX
+from blancops.configs.paths import lookups_dir, resolve_data_dir, workspace
+from blancops.configs.enums import AcceptanceRule, LookupKeys
 import matplotlib.pyplot as plt
 import warnings
 import logging
@@ -18,12 +19,21 @@ def main():
         description="Generate train-data lookup tables from raw DECam observations."
     )
     parser.add_argument(
-        "--fits_path", type=Path, default=DES_FITS_PATH,
+        "--fits_path", type=Path, default=workspace().des_fits,
         help="Path to the raw DECam exposures FITS file",
     )
     parser.add_argument(
-        "-o", "--out_parent_dir", type=Path, default=DES_DATA_DIR,
-        help="Directory to save the generated lookup tables. Defaults to WORKSPACE / 'data' / 'train' / 'des')",
+        "-o", "--out_parent_dir", type=Path, default=workspace().des_data,
+        help="Directory to save the generated lookup tables; relative paths are under the workspace root. Defaults to workspace().des_data",
+    )
+    parser.add_argument(
+        "--acceptance", choices=[r.value for r in AcceptanceRule], default=AcceptanceRule.UNIFORM.value,
+        help="Which exposures count toward the survey: one 0.3 teff threshold, or DES's per-band "
+             "minimum teff (Morganson et al. 2018, Table 4). Must match data.acceptance of the runs using these lookups.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true",
+        help="Allow replacing existing lookups that were built with a different --acceptance.",
     )
     parser.add_argument(
         '-p', '--save_plots', action="store_true",
@@ -45,8 +55,13 @@ def main():
     # --------------------------------------
     # SETUP OUTDIR
     # --------------------------------------
-    out_parent_dir = Path(args.out_parent_dir)
-    lookups_outdir = out_parent_dir / "lookups"
+    out_parent_dir = resolve_data_dir(args.out_parent_dir)
+    lookups_outdir = lookups_dir(out_parent_dir)
+    built = ((lookups_outdir / LookupKeys.ACCEPTANCE.value).exists()
+             and TrainLookupTables.load_acceptance(lookups_outdir).value)
+    if built and built != args.acceptance and not args.overwrite:
+        raise SystemExit(f"{lookups_outdir} holds lookups built with acceptance '{built}'; pass a different "
+                         f"-o for '{args.acceptance}', or --overwrite to replace them.")
     figures_outdir = out_parent_dir / "figures"
     lookups_outdir.mkdir(parents=True, exist_ok=True)
     figures_outdir.mkdir(parents=True, exist_ok=True)
@@ -55,7 +70,8 @@ def main():
     # --------------------------------------
     # BUILD LOOKUPS
     # --------------------------------------
-    lookups = build_DES_lookups(fits_path=args.fits_path, outdir=lookups_outdir)
+    lookups = build_DES_lookups(fits_path=args.fits_path, outdir=lookups_outdir, acceptance=args.acceptance)
+    filter2idx = lookups.survey.filter2idx
     save = args.save_plots
 
     # --------------------------------------
@@ -78,7 +94,7 @@ def main():
 
         # Plot target counts
         fig, ax = plt.subplots(figsize=_FIGSIZE)
-        for filt, fidx in FILTER2IDX.items():
+        for filt, fidx in filter2idx.items():
             ax.scatter(np.arange(len(lookups.fields)), lookups.target_fidfilt_counts[:, fidx], label=filt, s=5, alpha=.5)
         ax.set_xlabel('Field id')
         ax.set_ylabel('Counts')
@@ -92,7 +108,7 @@ def main():
         visits = np.array(list(lookups.night2fidfilt_visit_hist.values()))
         mean_visits = visits.mean(axis=1)
         std_visits = visits.std(axis=1)
-        for filt, fidx in FILTER2IDX.items():
+        for filt, fidx in filter2idx.items():
             ax.plot(np.arange(len(mean_visits)), mean_visits[:, fidx], label=filt, color=f"C{fidx}")
             ax.fill_between(
                 np.arange(len(lookups.night2fidfilt_visit_hist)),
@@ -125,7 +141,7 @@ def main():
             mean_times = np.nanmean(t_since_last_visit, axis=1)
             std_times = np.nanstd(t_since_last_visit, axis=1)
 
-        for filt, fidx in FILTER2IDX.items():
+        for filt, fidx in filter2idx.items():
             night_idxs = np.arange(len(mean_times))
             _filt_means = mean_times[:, fidx]
             _filt_stds = std_times[:, fidx]
@@ -151,8 +167,8 @@ def main():
         # --------------------------------------
 
         fig, axes = plt.subplots(
-            nrows=len(FILTER2IDX), ncols=1,
-            figsize=(8, 2 * len(FILTER2IDX)),
+            nrows=len(filter2idx), ncols=1,
+            figsize=(8, 2 * len(filter2idx)),
             sharex=True,
         )
 
@@ -184,7 +200,7 @@ def main():
         # contributing shape: (n_nights, n_filters)
 
         night_idxs = np.arange(pct.shape[1])
-        for (filt, fidx), ax in zip(FILTER2IDX.items(), axes):
+        for (filt, fidx), ax in zip(filter2idx.items(), axes):
             ax2 = ax.twinx()
             p10, p50, p90 = pct[0, :, fidx], pct[1, :, fidx], pct[2, :, fidx]
             ax.plot(night_idxs, p50, color=f"C{fidx}", label=f"{filt} median")

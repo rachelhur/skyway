@@ -6,6 +6,45 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def q_value_metrics(q_all: torch.Tensor, q_taken: torch.Tensor, q_target: torch.Tensor,
+                    action_masks: torch.Tensor) -> dict:
+    """Q-scale diagnostics over valid actions, shared by the value-based algorithms.
+
+    rel_td_error = mean|Q(s,a) - y| / mean|Q(s,a)|; td_residual = mean(y - Q(s,a));
+    q_gap = mean_s max_{valid a} Q(s,a) - mean Q(s,a_data).
+
+    Parameters
+    ----------
+    q_all : torch.Tensor
+        Q-values for every action, shape (batch, n_actions).
+    q_taken : torch.Tensor
+        Q of the dataset action, shape (batch,).
+    q_target : torch.Tensor
+        Bellman target y for the dataset action, shape (batch,).
+    action_masks : torch.Tensor
+        Valid-action mask, bool, shape (batch, n_actions).
+
+    Returns
+    -------
+    dict
+        rel_td_error, td_residual, q_policy, q_gap, q_max, q_min, q_target_mean as floats.
+    """
+    q_all, q_taken, q_target = q_all.float(), q_taken.float(), q_target.float()                # reduce in fp32 under autocast
+    q_valid_max = q_all.masked_fill(~action_masks, torch.finfo(q_all.dtype).min).max(dim=1)[0]  # [batch]
+    q_valid = q_all[action_masks]                                                             # [n_valid]
+    td_error = (q_taken - q_target).abs().mean()
+    q_policy = q_valid_max.mean()
+    return {
+        "rel_td_error":  (td_error / q_taken.abs().mean().clamp_min(1e-8)).item(),
+        "td_residual":   (q_target - q_taken).mean().item(),
+        "q_policy":      q_policy.item(),
+        "q_gap":         (q_policy - q_taken.mean()).item(),
+        "q_max":         q_valid.max().item(),
+        "q_min":         q_valid.min().item(),
+        "q_target_mean": q_target.mean().item(),
+    }
+
+
 class AlgorithmBase(ABC):
     """Owns the optimizer/scheduler lifecycle and the train/val step template.
 
@@ -42,7 +81,7 @@ class AlgorithmBase(ABC):
     # ----------------------------------------------------------------------- #
 
     def train_step(
-        self, batch, epoch_num, step_num=None, hpGrid=None, compute_metrics=False) -> dict:
+        self, batch, epoch_num, step_num=None, candidate_grid=None, compute_metrics=False) -> dict:
         self.policy.train()
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -50,7 +89,7 @@ class AlgorithmBase(ABC):
 
         with torch.amp.autocast(self.device_type_str, dtype=self.amp_dtype):
             loss, metrics = self._compute_loss(
-                batch_dict, hpGrid=hpGrid, compute_metrics=compute_metrics
+                batch_dict, candidate_grid=candidate_grid, compute_metrics=compute_metrics
             )
 
         loss.backward()
@@ -62,14 +101,14 @@ class AlgorithmBase(ABC):
         metrics["train_loss"] = loss.item()
         return metrics
 
-    def val_step(self, batch, hpGrid=None) -> dict:
+    def val_step(self, batch, candidate_grid=None) -> dict:
         self.policy.eval()
         batch_dict = self._unpack_batch(batch)
 
         with torch.no_grad():
             with torch.amp.autocast(self.device_type_str, dtype=self.amp_dtype):
                 loss, metrics = self._compute_loss(
-                    batch_dict, hpGrid=hpGrid, compute_metrics=True
+                    batch_dict, candidate_grid=candidate_grid, compute_metrics=True
                 )
 
         metrics["val_loss"] = loss.item()
@@ -86,7 +125,7 @@ class AlgorithmBase(ABC):
 
     @abstractmethod
     def _compute_loss(
-        self, batch_dict: dict, hpGrid=None, compute_metrics: bool = False) -> tuple[torch.Tensor, dict]:
+        self, batch_dict: dict, candidate_grid=None, compute_metrics: bool = False) -> tuple[torch.Tensor, dict]:
         """Return (loss_tensor, metrics_dict). metrics_dict may be empty if
         compute_metrics is False."""
         ...

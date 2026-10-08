@@ -1,44 +1,8 @@
 from collections import OrderedDict
 from enum import IntEnum
-import os
-from pathlib import Path
 from typing import Dict, List, Literal
 
 import numpy as np
-
-"""
-Directories and Paths
-"""
-
-def get_workspace_dir() -> Path:
-    """Determines the active workspace. Priority: (1) environment variable (2) pointer file (saved after running model-init) (3) default=`~/.blancops`
-    """
-    env_workspace = os.getenv("BLANCOPS_WORKSPACE")
-    if env_workspace:
-        return Path(env_workspace).resolve()
-        
-    pointer_file = Path.home() / ".blancops_profile"
-    if pointer_file.exists():
-        saved_path = pointer_file.read_text().strip()
-        if saved_path:
-            return Path(saved_path).resolve()
-            
-    # 3. Fallback to default
-    return Path.home() / ".blancops"
-
-WORKSPACE = get_workspace_dir()
-
-PATHS = {
-    "TRAIN_DIR": Path(WORKSPACE / "data" / "train"),
-    "DES_DATA_DIR": Path(WORKSPACE / "data" / "train" / "des"),
-    "HEALPIX_GRID": Path(WORKSPACE / "data" / "test_suite" / "healpix-grid"),
-    "MAGIC_SPRING": Path(WORKSPACE / "data" / "test_suite" / "magic-spring"),
-    "SAMPLE_110825": Path(WORKSPACE / "data" / "test_suite" / "sample-110825")
-}
-
-DES_DATA_DIR = PATHS["DES_DATA_DIR"]
-DES_FITS_PATH = DES_DATA_DIR / "fits" / "decam-exposures-20251211.fits"
-
 
 """
 Feature names
@@ -52,13 +16,15 @@ _FILTER_DEP_FEATURE_NAMES = [
     # bin features
     'min_tiling', 'num_unvisited_fields', 'num_incomplete_fields', 't_since_last_visit',
     'rel_min_tiling', 'rel_num_unvisited_fields', 'rel_num_incomplete_fields', 'rel_t_since_last_visit',
+    # field features
+    'completion', 'rel_completion',
     ]
 
 
 _DEFAULT_BC_AZEL_GLOB_FEATURES = [
     't_night', 'moon_phase', 'moon_distance',
     'airmass', 'ha', 'lst', 'el', 'az',
-    'sun_ra', 'sun_dec', 'sun_az', 'sun_el', 
+    'sun_ra', 'sun_dec', 'sun_az', 'sun_el',
     'moon_ra', 'moon_dec', 'moon_az', 'moon_el',
     'is_filter', 'sky_brightness', 'global_mean_tiling',
     'fwhm'
@@ -67,7 +33,7 @@ _DEFAULT_BC_AZEL_BIN_FEATURES = [
     'moon_distance', 'airmass', 'el',
     'delta_az', 'delta_el',
     'pointing_distance',
-    'rel_ha', 'rel_moon_distance', 'rel_t_since_last_visit', 
+    'rel_ha', 'rel_moon_distance', 'rel_t_since_last_visit',
     'rel_min_tiling', 'rel_num_unvisited_fields', 'rel_num_incomplete_fields',
     't_until_set'
 ]
@@ -109,8 +75,8 @@ _BIN_FEATURES = [
     "rel_ha", "rel_moon_distance",
     "delta_az",    # always use
     "delta_el",    # always use
-    "az", 
-    "el", 
+    "az",
+    "el",
     "ra",		# don't use - specific to DES footprint and could cause memorization
     "dec",      # test
     "pointing_distance",       # test
@@ -120,13 +86,22 @@ _BIN_FEATURES = [
     "rel_num_unvisited_fields", # The number of univisited fields in this bin divided by total number of fields in this bin
     "rel_num_incomplete_fields",  # The number of incomplete fields in this bin divided by total number of fields in this bin
     "rel_min_tiling",	# The minimum tiling amongst all fields in this bin, divided by that field's target tiling.
-    "rel_t_since_last_visit", # The last time since this bin has been visited in the survey minus the mean "last time since last visit" across all bins at this timestamp 
+    "rel_t_since_last_visit", # The last time since this bin has been visited in the survey minus the mean "last time since last visit" across all bins at this timestamp
     "t_until_set", # always use
     "t_since_last_visit" # use rel_t_since_last_visit instead
                             # the z-score norm bakes in an assumed survey cadence
                             # resulting in loss of generality for future surveys
                             # rel_t_since_last_visit still suffers from a different spread,
                             # but much better off
+]
+
+
+# Per-field features for the field_filter action space (base names; completion and
+# t_since_last_visit expand per filter). Positional features are evaluated at field centers.
+_FIELD_FEATURES = [
+    "el", "airmass", "ha", "moon_distance", "sun_distance", "pointing_distance",
+    "delta_az", "delta_el", "t_until_set", "rel_ha", "rel_moon_distance",
+    "completion", "rel_completion", "t_since_last_visit",
 ]
 
 
@@ -147,19 +122,19 @@ _ALLOWED_NORMS_PER_FEATURE = {
     'az': {'cyclical'},
     'ha': {'cyclical'},
     'lst': {'cyclical'},
-    
+
     # Sun coords
     'sun_ra': {'cyclical'},
     'sun_az': {'cyclical'},
     'sun_el': {'z_score'},
     'sun_dec': {'z_score'},
-    
+
     # Moon coords
     'moon_ra': {'cyclical'},
     'moon_az': {'cyclical'},
     'moon_el': {'z_score'},
     'moon_dec': {'z_score'},
-    
+
     'moon_distance': {'z_score'},
     'sun_distance': {'z_score'},
     'airmass': {'log', 'z_score'},
@@ -169,29 +144,29 @@ _ALLOWED_NORMS_PER_FEATURE = {
     'delta_el': {'z_score'},
     'el': {'z_score'},
     'dec': {'z_score'},
-    
+
     'fwhm': {'log', 'z_score'},
     'urgency': {'log', 'z_score'},
     'survey_progress': {'fractional', 'sin', 'z_score'},
-    
+
     'pointing_distance': ['z_score'],
     'num_unvisited_fields': ['z_score'],
     'num_incomplete_fields': ['z_score'],
     'min_tiling': ['z_score'],
-    
+
     'rel_num_unvisited_fields': {'local_mean_z', 'local_z_score'},
     'rel_num_incomplete_fields': {'local_mean_z', 'local_z_score'},
     'rel_min_tiling': {'local_mean_z', 'local_z_score'},
     'rel_t_since_last_visit': {'local_mean_z', 'log', 'local_z_score'},
     'rel_moon_distance': {'local_mean_z', 'local_z_score'},
     'rel_ha': {'local_mean_z', 'local_z_score'},
-    
+
     't_night': {'fractional'},
     't_survey': {'fractional'},
     'moon_phase': {'fractional'},
     'survey_num_visits_done': {'fractional'},
     't_until_set': {'fractional'},
-    't_since_last_visit': {'fractional', 'z_score', 'log', None}, 
+    't_since_last_visit': {'fractional', 'z_score', 'log', None},
     'global_mean_tiling': {'fractional'},
 }
 
@@ -209,13 +184,13 @@ _DEFAULT_NORM_MAPPING = {
     'sun_az': ['cyclical'],
     'sun_el': ['z_score'],
     'sun_dec': ['z_score'],
-    
+
     # Moon coords
     'moon_ra': ['cyclical'],
     'moon_az': ['cyclical'],
     'moon_el': ['z_score'],
     'moon_dec': ['z_score'],
-    
+
     # Image quality
     'moon_distance': ['z_score'],
     'sun_distance': ['z_score'],
@@ -225,20 +200,20 @@ _DEFAULT_NORM_MAPPING = {
     'delta_el': ['z_score'],
     'fwhm': ['log', 'z_score'],
     'urgency': ['z_score'],
-    
+
     # Bin features
     'pointing_distance': ['z_score'],
     'num_unvisited_fields': ['z_score'],
     'num_incomplete_fields': ['z_score'],
     'min_tiling': ['z_score'],
-    
+
     'rel_num_unvisited_fields': ['local_mean_z'],
     'rel_num_incomplete_fields': ['local_mean_z'],
     'rel_min_tiling': ['local_mean_z'],
     'rel_moon_distance': ['local_mean_z'],
     'rel_ha': ['local_mean_z'],
     'rel_t_since_last_visit': ['local_mean_z'],
-    
+
     't_night': ['fractional'],
     't_survey': ['fractional'],
     'moon_phase': ['fractional'],
@@ -247,28 +222,6 @@ _DEFAULT_NORM_MAPPING = {
     't_since_last_visit': ['z_score'],
     'global_mean_tiling': ['fractional'],
 }
-
-
-"""
-SISPI FORMAT
-"""
-
-_EMPTY_SISPI_DICT = OrderedDict([
-    ("object",  None),
-    ("seqnum",  None), # 1-indexed
-    ("seqtot",  1),
-    ("seqid",   ""),
-    ("expTime", 90),
-    ("RA",      None),
-    ("dec",     None),
-    ("filter",  None),
-    ("count",   1),
-    ("expType", "object"),
-    ("program", None),
-    ("wait",    "False"),
-    ("propid",  None),
-    ("comment", ""),
-])
 
 """
 
@@ -284,14 +237,6 @@ RADEC_BIN_FEAT_SENTINEL = -1.0 # no fields ever
 class EnvSignal(IntEnum):
     WAIT = -2
     NO_FILTER = -1
-    
-"""
-BLANCO CONSTS
-"""
-
-# BLANCO_LAT = -30.169
-BLANCO_LON = "-70:48:23.49"
-BLANCO_ELEV = 2200
 
 """
 
@@ -310,36 +255,6 @@ ZENITH_BIN_NUM = -1
 ZENITH_WAVELENGTH = 0
 ZENITH_FILTER_IDX = -1
 ZENITH_FILTER = 'null'
-
-"""
-
-FILTER INFO 
-
-"""
-
-# Filter wavelengths (nm) according to obztak https://github.com/kadrlica/obztak/blob/c28fab23b09bcff1cf46746eae4ec7e40aeb7f7a/obztak/seeing.py#L22
-FILTER2WAVE = {
-    # 'u': 380, # not present in train data,
-    'g': 480,
-    'r': 640,
-    'i': 780,
-    'z': 920,
-    'Y': 990
-}
-
-_NUM_FILTERS = len(FILTER2WAVE)
-IDX2WAVE = {i: FILTER2WAVE[k] for i, k in enumerate(FILTER2WAVE.keys())}
-FILTERWAVENORM = 1000.
-
-FILTER2IDX = {k: i for i, k in enumerate(FILTER2WAVE.keys())}
-IDX2FILTER = {v: k for k, v in FILTER2IDX.items()}
-
-# Reference band for seeing (FWHM) projection. Used when a pointing carries no
-# filter (zenith / WAIT) so the wavelength term drops out, and as the default
-# band for seeding forward-sim seeing in OfflineBlancoEnv. r-band by convention
-# (matches the obztak seeing reference above).
-FWHM_REF_FILTER = 'r'
-FWHM_REF_WAVELENGTH = FILTER2WAVE[FWHM_REF_FILTER]
 
 
 # SIN_NORM_FEATURE_NAMES = []

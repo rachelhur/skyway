@@ -8,32 +8,36 @@ import time
 from blancops.rl.trainer import Trainer
 from blancops.utils.sys_utils import get_system_device, seed_everything
 from blancops.io.logger_utils import configure_logger
-from blancops.data.dataset import TransitionDataset, OfflineDataset
-from blancops.data.feature_cache import RawFeatureCache, ValDatasetCache
+from blancops.data.dataset import TransitionDataset, TransitionDatasetCache, OfflineDataset
+from blancops.data.feature_cache import FieldFeatureCache, BinFeatureCache
+from blancops.data.splits import resolve_night_split
 from blancops.data.lookup_tables import TrainLookupTables
 from blancops.plotting.training_viz import (
-    plot_bin_feature_distributions, plot_bin_membership,
+    plot_candidate_feature_distributions, plot_bin_membership,
     plot_global_feature_distributions, plot_train_metrics,
 )
 from blancops.rl.registry import build_algorithm
-from blancops.configs.rl_schema import ExperimentConfig, load_and_validate, resolve_and_save
-from blancops.configs.constants import DES_DATA_DIR, WORKSPACE
+from blancops.configs.experiment_schema import ExperimentConfig, load_and_validate, resolve_and_save
+from blancops.configs.paths import RunPaths, feature_cache_dir, field_feature_cache_dir, lookups_dir, resolve_data_dir, workspace
 from blancops.configs.enums import Algorithm, CheckpointMetric
 
 import argparse
 import gc
+import json
 import logging
 logger = logging.getLogger(__name__)
 
 from pathlib import Path
+from blancops.configs.enums import grid_is_azel, is_field_level
 
 
 def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-c', '--cfg', type=str, default=None, required=True,
                         help="Path to config file.")
-    parser.add_argument('--data_dir', type=str, default=str(DES_DATA_DIR),
-                        help="Data directory containing lookups/ and the feature cache.")
+    parser.add_argument('--data_dir', type=str, default=None,
+                        help="Data directory containing lookups/ and the feature cache. "
+                             "Defaults to the config's data.data_dir; an override is recorded in the resolved config.")
     parser.add_argument('-l', '--logging_level', type=str, default='info',
                         help='Logging level.')
     parser.add_argument('--resume_from_checkpoint', action='store_true',
@@ -44,44 +48,34 @@ def get_args():
                         help='Completely overwrite existing results.')
     parser.add_argument('--top_k', type=int, default=1,
                         help='Number of top runs to keep.')
+    parser.add_argument('--dry_run_split', action='store_true',
+                        help=(
+                            'Resolve the night split, write configs/split.json, and exit.'
+                            'Useful only when re-runningon the same split as another run.'
+                        )
+    )
     return parser.parse_args()
 
 
-def setup_result_outdirs(cfg: ExperimentConfig):
-    parent = Path(cfg.parent_dir)
-    if not parent.is_absolute():
-        parent = WORKSPACE / parent
-
-    if cfg.outdir:
-        outdir = Path(cfg.outdir)
-        if not outdir.is_absolute():
-            outdir = WORKSPACE / outdir
-    else:
-        outdir = parent / cfg.experiment_name
-
-    outdir.mkdir(parents=True, exist_ok=True)
-    for subdir in ('figures', 'checkpoints', 'metrics', 'configs', 'logs'):
-        (outdir / subdir).mkdir(parents=True, exist_ok=True)
-
-    cfg.outdir = str(outdir)
-    return outdir
-
-
-def _cache_dir(data_dir: Path, nside: int, is_azel: bool) -> Path:
-    coord = 'azel' if is_azel else 'radec'
-    return data_dir / f"feature_cache_nside{nside}_{coord}"
+def setup_result_outdirs(cfg: ExperimentConfig) -> RunPaths:
+    """Create the run directory (a relative cfg.outdir is resolved against the workspace)."""
+    run_paths = RunPaths(workspace().root / cfg.outdir)
+    run_paths.make_dirs()
+    cfg.outdir = str(run_paths.root)
+    return run_paths
 
 
 def main():
     args = get_args()
     cfg = load_and_validate(args.cfg)
-    outdir = setup_result_outdirs(cfg)
+    run_paths = setup_result_outdirs(cfg)
+    outdir = run_paths.root
 
     logger = configure_logger(
         level=args.logging_level,
         log_to_stdout=True,
         log_to_file=True,
-        outdir=outdir / "logs",
+        outdir=run_paths.logs,
         filename="train.log",
         use_tqdm=True,
     )
@@ -90,59 +84,97 @@ def main():
     device = get_system_device()
 
     # --- LOAD FEATURE CACHE --- #
-    data_dir = Path(args.data_dir)
-    is_azel = 'azel' in cfg.data.action_space
-    cache_dir = _cache_dir(data_dir, cfg.data.nside, is_azel)
+    if args.data_dir is not None:
+        cfg.data.data_dir = str(args.data_dir)
+    data_dir = resolve_data_dir(cfg.data.data_dir)
+    train_lookups = TrainLookupTables.load_from_dir(lookups_dir(data_dir), acceptance=cfg.data.acceptance)
+    is_azel = grid_is_azel(cfg.data.action_space)
+    field_level = is_field_level(cfg.data.action_space)
+    cache_cls = FieldFeatureCache if field_level else BinFeatureCache
+    cache_dir = field_feature_cache_dir(data_dir) if field_level else feature_cache_dir(data_dir, cfg.data.nside, is_azel)
 
-    if not RawFeatureCache.exists(cache_dir):
+    if not cache_cls.exists(cache_dir):
         raise FileNotFoundError(
             f"Feature cache not found at {cache_dir}. "
             f"Run `precompute-features --outdir {cache_dir} ...` first."
         )
+    if args.dry_run_split:
+        night_split = resolve_night_split(
+            unique_nights=cache_cls.nights_in_range(
+                cache_dir,
+                start_date=cfg.data.start_date,
+                end_date=cfg.data.end_date,
+            ),
+            seed=int(cfg.train.seed),
+            val_nights=cfg.data.val_nights,
+            val_frac=cfg.data.effective_val_frac,
+            test_nights=cfg.data.test_nights,
+            test_frac=cfg.data.test_frac,
+        )
+        night_split.save(run_paths.split_json)
+        logger.info(f"Dry run split: {night_split.counts}")
+        return
+
     logger.info(f"Loading feature cache from {cache_dir}")
-    cache = RawFeatureCache.load(
-        cache_dir, mmap_bin=True,
-        start_date=cfg.data.start_date,
-        end_date=cfg.data.end_date,
-    )
-    train_lookups = TrainLookupTables.load_from_dir(data_dir / "lookups")
+    if field_level:
+        cache = FieldFeatureCache.load(cache_dir, mmap=True, start_date=cfg.data.start_date, end_date=cfg.data.end_date,
+                                       acceptance=cfg.data.acceptance)
+    else:
+        cache = BinFeatureCache.load(
+            cache_dir, mmap_bin=True,
+            start_date=cfg.data.start_date,
+            end_date=cfg.data.end_date,
+            acceptance=cfg.data.acceptance,
+        )
 
     # --- CONSTRUCT TRAIN DATASET --- #
     train_dataset = TransitionDataset(
-        mode='train',
         cache=cache,
         cfg=cfg,
         lookups=train_lookups,
     )
+    norm_stats = train_dataset.norm_stats
+    norm_stats_path = run_paths.norm_stats_json
+    norm_stats_path.write_text(json.dumps(norm_stats.to_dict(), indent=4))
+    logger.info(f"Normalization stats saved to {norm_stats_path}")
     logger.info(
         f"Train dataset: {train_dataset.n_nights} nights, "
         f"{train_dataset.num_transitions} transitions"
     )
     cache.log_transition_filter_stats(train_dataset.train_nights, label='Train')
 
-    # --- BUILD VAL DATASET CACHE --- #
-    val_nights = train_dataset.val_nights
-    val_raw_cache = cache.filter_nights(val_nights, label='Val')
-    val_dataset = TransitionDataset(
-        mode='test',
-        cache=val_raw_cache,
-        cfg=cfg,
-        lookups=train_lookups,
-        z_score_stats=train_dataset.get_norm_stats()['z_score'],
-        rel_norm_stats=train_dataset.get_norm_stats()['rel_norm'],
-    )
-    val_cache_path = outdir / "checkpoints" / "val_dataset_cache.pt"
-    ValDatasetCache.from_transition_dataset(val_dataset).save(val_cache_path)
-    logger.info(f"Val dataset cache saved to {val_cache_path}")
+    # --- BUILD SPLIT DATASET CACHES --- #
+    night_split = train_dataset.night_split
+    night_split.save(run_paths.split_json)
 
-    del cache, val_raw_cache, val_dataset
+    for split in ('val', 'test'):
+        split_nights = night_split.nights_for(split)
+        if not split_nights:
+            logger.info(f"No {split} nights; skipping {split} dataset cache.")
+            continue
+        split_raw_cache = cache.filter_nights(split_nights, label=split.capitalize())
+        split_dataset = TransitionDataset(
+            cache=split_raw_cache,
+            cfg=cfg,
+            lookups=train_lookups,
+            norm_stats=norm_stats,
+            split_role=split,
+        )
+        split_cache_path = run_paths.dataset_cache(split)
+        TransitionDatasetCache.from_transition_dataset(split_dataset, split=split).save(split_cache_path)
+        logger.info(f"{split} dataset cache saved to {split_cache_path}")
+        del split_raw_cache, split_dataset
+        gc.collect()
+
+    del cache
     gc.collect()
     logger.info("Released feature cache from memory.")
 
     # --- DEFAULT PLOTS --- #
-    plot_bin_membership(train_dataset, outdir / "figures")
-    plot_global_feature_distributions(train_dataset, outdir / "figures")
-    plot_bin_feature_distributions(train_dataset, outdir / "figures")
+    if not field_level:
+        plot_bin_membership(train_dataset, run_paths.figures)
+    plot_global_feature_distributions(train_dataset, run_paths.figures)
+    plot_candidate_feature_distributions(train_dataset, run_paths.figures)
 
     # --- DATALOADERS --- #
     offline_dataset = OfflineDataset(
@@ -170,11 +202,11 @@ def main():
         dataset_dims=train_dataset.dataset_dims,
         dataset_feature_names=train_dataset.dataset_feature_names,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
-        val_nights=train_dataset.val_nights,
-        outdir=outdir / "configs",
+        night_split=night_split,
+        outdir=run_paths.configs,
     )
     algorithm = build_algorithm(cfg, device=device)
-    latest_ckpt_path = outdir / "checkpoints" / "latest_checkpoint.pt"
+    latest_ckpt_path = run_paths.latest_checkpoint
 
     trainer = Trainer(
         algorithm=algorithm,
@@ -183,6 +215,7 @@ def main():
         overwrite=args.overwrite,
         hard_overwrite=args.hard_overwrite,
         ckpt_metric=cfg.train.checkpoint_metric,
+        save_every_n_epochs=cfg.train.save_every_n_epochs,
     )
 
     if latest_ckpt_path.exists() and args.resume_from_checkpoint:
@@ -200,8 +233,8 @@ def main():
         valloader=valloader,
         batch_size=cfg.train.batch_size,
         patience=cfg.train.patience,
-        hpGrid=train_dataset.hpGrid,
-        norm_stats=train_dataset.get_norm_stats(),
+        candidate_grid=train_dataset.candidate_grid,
+        norm_stats=norm_stats.to_dict(),
     )
     end_time = time.time()
     logger.info(f"Total train time = {end_time - start_time:.1f}s on {device}")

@@ -22,22 +22,6 @@ def seed_everything(seed, deterministic=False):
     torch.backends.cudnn.deterministic = deterministic
     torch.backends.cudnn.benchmark = False
 
-def get_workspace_dir() -> Path:
-    """Determines the active workspace. Priority: (1) environment variable (2) pointer file (saved after running model-init) (3) default=`~/.blancops`
-    """
-    env_workspace = os.getenv("BLANCOPS_WORKSPACE")
-    if env_workspace:
-        return Path(env_workspace).resolve()
-        
-    pointer_file = Path.home() / ".blancops_profile"
-    if pointer_file.exists():
-        saved_path = pointer_file.read_text().strip()
-        if saved_path:
-            return Path(saved_path).resolve()
-            
-    # 3. Fallback to default
-    return Path.home() / ".blancops"
-
 # def load_model_config(config_path=None):
 #     """Loads a custom config if provided, otherwise loads the default from the package."""
 #     if config_path:

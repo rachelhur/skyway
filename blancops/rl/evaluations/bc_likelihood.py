@@ -4,9 +4,9 @@ Typical entry point::
 
     results = evaluate_run("/path/to/run_dir")
 
-This loads ``checkpoints/model.pt``, ``checkpoints/val_dataset_cache.pt``, and
-``configs/resolved_config.yaml`` from the run directory and returns a dict of
-log-likelihood metrics over the held-out validation set.
+This loads ``checkpoints/model.pt``, ``checkpoints/<split>_dataset_cache.pt``,
+and ``configs/resolved_config.yaml`` from the run directory and returns a dict
+of log-likelihood metrics over the held-out split.
 """
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from blancops.configs.rl_schema import load_and_validate
-from blancops.data.feature_cache import ValDatasetCache
+from blancops.configs.experiment_schema import load_and_validate
+from blancops.data.dataset import TransitionDatasetCache
+from blancops.configs.paths import RunPaths
 from blancops.rl.agent_factory import AgentFactory
 
 import logging
@@ -31,31 +32,32 @@ def evaluate_run(
     device: torch.device | None = None,
     num_workers: int = 0,
     pin_memory: bool = False,
+    split: str = 'val',
 ) -> dict:
     """Compute BC log-likelihood for a completed training run.
 
     Loads from the standard run-directory layout::
 
         <run_dir>/checkpoints/model.pt
-        <run_dir>/checkpoints/val_dataset_cache.pt
+        <run_dir>/checkpoints/<split>_dataset_cache.pt
         <run_dir>/configs/resolved_config.yaml
 
     Returns the same dict as compute_bc_loglikelihood.
     """
-    run_dir = Path(run_dir)
+    run_paths = RunPaths(run_dir)
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    cfg = load_and_validate(run_dir / "configs" / "resolved_config.yaml")
+    cfg = load_and_validate(run_paths.resolved_config)
 
     policy, _ = AgentFactory.load_policy(
-        weights_path=run_dir / "checkpoints" / "model.pt",
+        weights_path=run_paths.model_pt,
         cfg=cfg,
         device=device,
     )
 
-    loader = val_loader_from_cache(
-        run_dir / "checkpoints" / "val_dataset_cache.pt",
+    loader = loader_from_cache(
+        run_paths.dataset_cache(split),
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -64,24 +66,19 @@ def evaluate_run(
     return compute_bc_loglikelihood(policy, loader, device=device)
 
 
-def val_loader_from_cache(
+def loader_from_cache(
     cache_path: Path,
     batch_size: int = 512,
     num_workers: int = 0,
     pin_memory: bool = False,
 ) -> DataLoader:
-    """Build a DataLoader over val transitions from a saved ValDatasetCache.
+    """Build a DataLoader over one split's transitions from a saved TransitionDatasetCache.
 
     Expands per-state tensors to per-transition via curr_compact_idxs,
     mirroring the val_loader in OfflineDataset (shuffle=False, drop_last=False).
     """
-    cache = ValDatasetCache.load(cache_path)
-
-    c_idxs = torch.from_numpy(cache.curr_compact_idxs).long()
-    states_tr     = cache.states[c_idxs]           # (N_tr, D_glob)
-    bin_states_tr = cache.bin_states[c_idxs]       # (N_tr, n_bins, D_bin)
-    masks_tr      = cache.action_masks[c_idxs]     # (N_tr, n_actions)
-    actions       = cache.actions                  # (N_tr,) flat expert action
+    cache = TransitionDatasetCache.load(cache_path)
+    states_tr, bin_states_tr, actions, masks_tr = cache.to_transition_tensors()
 
     dataset = TensorDataset(states_tr, actions, masks_tr, bin_states_tr)
     return DataLoader(
@@ -103,7 +100,7 @@ def compute_bc_loglikelihood(
     """Mean action log-likelihood E_n[ log P(a_expert_n | s_n) ] over val_loader.
 
     val_loader must yield (state, action, action_mask, bin_state) batches,
-    as produced by val_loader_from_cache.
+    as produced by loader_from_cache.
 
     Returns
     -------
@@ -154,3 +151,7 @@ def compute_bc_loglikelihood(
         per_obs=per_obs,
         n_finite=int(finite_mask.sum()),
     )
+
+
+# Backwards-compatible alias
+val_loader_from_cache = loader_from_cache

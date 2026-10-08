@@ -7,11 +7,15 @@ logger = logging.getLogger(__name__)
 import torch
 from torch import nn
 
-from blancops.configs.rl_schema import ExperimentConfig
-from blancops.configs.enums import _AUTOREGRESSIVE_NETWORKS, Algorithm, ActionArchitecture, Network, ActionSpace, is_autoregressive
+from blancops.configs.experiment_schema import ExperimentConfig
+from blancops.configs.enums import (
+    _AUTOREGRESSIVE_NETWORKS, Algorithm, ActionArchitecture, Network, ActionSpace,
+    is_autoregressive, grid_is_azel, is_field_level
+)
 from blancops.rl.neural_nets.neural_nets import (
     ContextualScoreMLP,
     MLP,
+    StateValueMLP,
     AutoregressiveNet,
     DualStreamMLP,
 )
@@ -115,7 +119,7 @@ def build_network(cfg: ExperimentConfig) -> nn.Module:
     if cfg.model.network == Network.CONTEXTUAL_SCORE_MLP:
         return network_class(
             global_dim=cfg.data.state_dim,
-            bin_feat_dim=cfg.data.bin_state_dim,
+            cand_feat_dim=cfg.data.candidate_state_dim,
             score_dim=cfg.data.num_filters,
             hidden_dim=cfg.model.hidden_dim,
             nlayers=cfg.model.nlayers,
@@ -124,15 +128,15 @@ def build_network(cfg: ExperimentConfig) -> nn.Module:
             activation=activation_fn,
             use_contextual_gating=cfg.model.contextual_gating,
         )
-    
+
     if cfg.model.network == Network.DUAL_STREAM_MLP:
         layer_norm = cfg.model.algorithm != Algorithm.BC
         return network_class(
-            global_dim=cfg.data.state_dim, 
-            bin_feat_dim=cfg.data.bin_state_dim, 
-            hidden_dim=cfg.model.hidden_dim, 
-            score_dim=cfg.data.num_filters, 
-            activation=activation_fn, 
+            global_dim=cfg.data.state_dim,
+            cand_feat_dim=cfg.data.candidate_state_dim,
+            hidden_dim=cfg.model.hidden_dim,
+            score_dim=cfg.data.num_filters,
+            activation=activation_fn,
             use_contextual_gating=False,
             use_layer_norm=layer_norm)
 
@@ -192,7 +196,7 @@ def _build_bc_policy(cfg: ExperimentConfig, core_net: nn.Module):
 
     if cfg.model.loss_strategy == ActionArchitecture.HYBRID_MARGINAL:
         ce_loss = nn.CrossEntropyLoss(reduction=cfg.model.reduction)
-        # Joint head can use focal loss; bin/filter marginals stay CE for stability.
+        # Joint head can use focal loss; candidate/filter marginals stay CE for stability.
         joint_loss = (
             get_loss_function('focal_loss', gamma_focal=cfg.model.gamma_focal, alpha=None)
             if cfg.model.loss_function == 'focal_loss'
@@ -201,10 +205,10 @@ def _build_bc_policy(cfg: ExperimentConfig, core_net: nn.Module):
         return strategy_class(
             core_net=core_net,
             num_filters=cfg.data.num_filters,
-            bin_loss_function=ce_loss,
+            candidate_loss_function=ce_loss,
             filter_loss_function=primary_loss,
             joint_loss_function=joint_loss,
-            alpha_bin=cfg.model.alpha_bin,
+            alpha_candidate=cfg.model.alpha_candidate,
             beta_filter=cfg.model.beta_filter,
             zeta_joint=cfg.model.zeta_joint,
         )
@@ -276,10 +280,11 @@ def build_algorithm(cfg: ExperimentConfig, device: torch.device):
             # CQL-specific scaling.
             dist_matrix = None
             dist_scaling_factor = 0.0
-            dist_matrix = calculate_distance_matrix(
-                nside=cfg.data.nside,
-                is_azel='azel' in str(cfg.data.action_space),
-            )
+            if not is_field_level(cfg.data.action_space):
+                dist_matrix = calculate_distance_matrix(
+                    nside=cfg.data.nside,
+                    is_azel=grid_is_azel(cfg.data.action_space),
+                )
             q_max = 1.0 / (1.0 - cfg.model.gamma)
             dist_scaling_factor = q_max / torch.pi
             return CQL(
@@ -310,10 +315,11 @@ def build_algorithm(cfg: ExperimentConfig, device: torch.device):
 
         target_net = copy.deepcopy(core_net).to(device)
         policy_raw = build_network(cfg).to(device)   # separate net for the AWR policy
-        v_net = MLP(
-            input_dim=cfg.data.state_dim,
-            output_dim=1,
-            hidden_dim=cfg.model.hidden_dim,
+        v_net = StateValueMLP(
+            glob_dim=cfg.data.state_dim,
+            cand_dim=cfg.data.num_candidates * cfg.data.candidate_state_dim,
+            hidden=(cfg.model.hidden_dim,) * cfg.model.nlayers,
+            layernorm=cfg.model.layernorm,
             activation=activation_fn,
         ).to(device)
 

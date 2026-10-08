@@ -27,24 +27,27 @@ logger = logging.getLogger(__name__)
 
 from collections import defaultdict
 
-from blancops.configs.constants import (
-    FILTER2IDX,
-    DES_DATA_DIR,
-    DES_FITS_PATH,
-    _NUM_FILTERS,
+from blancops.survey.profiles import DES, SurveyProfile
+from blancops.configs.paths import (
+    OfflineRunPaths, RunPaths,
+    feature_cache_dir, field_feature_cache_dir,
+    lookups_dir, resolve_data_dir
 )
 from blancops.ephemerides import ephemerides as _ephemerides
 from blancops.math.interpolate import interpolate_on_sphere
-from blancops.configs.rl_schema import ActionConstraints, load_and_validate
-from blancops.data.dataset import TransitionDataset
-from blancops.data.feature_cache import RawFeatureCache, ValDatasetCache
+from blancops.configs.experiment_schema import ActionConstraints, load_and_validate
+from blancops.data.dataset import TransitionDataset, TransitionDatasetCache
+from blancops.data.feature_cache import FieldFeatureCache, BinFeatureCache
+from blancops.data.norm_stats import NormStats
+from blancops.data.splits import NightSplit
 from blancops.data.features.normalizations import build_normalizer
 from blancops.data.lookup_tables import LookupTables, TrainLookupTables
 from blancops.environment.historic_env import HistoricBlancoEnv
+from blancops.rl.agent import filter_first_decode
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.checkpointer import get_checkpoint
 from blancops.rl.offline_runner import OfflineRunner
-from blancops.io.schedule_io import SCHEDULE_KEYS
+from blancops.io.file_io import read_schedule_csv
 
 from .data_container import (
     DataContainer,
@@ -52,6 +55,7 @@ from .data_container import (
     SingleStepDataContainer,
 )
 from .plotters import FILTER_COLORS, EvaluationPlotter, PlotStyle
+from blancops.configs.enums import grid_is_azel, has_filter, is_field_level
 
 
 # ----------------------------------------------------------------------
@@ -61,63 +65,97 @@ from .plotters import FILTER_COLORS, EvaluationPlotter, PlotStyle
 def build_evaluators(
     cfg_or_cfg_path,
     device,
-    eval_outdir: str = 'holdout_eval',
+    eval_outdir: str = None,
     style: PlotStyle = None,
     save_movie=False,
     save_mollweide=False,
+    plot_bins=False,
     data_dir=None,
+    action_decoding='joint',
+    split: str = 'val',
+    survey: SurveyProfile = DES,
 ) -> Tuple['SingleStepEvaluator', 'MultiStepEvaluator']:
-    """Build SS and MS evaluators for the validation set from a config."""
+    """Build SS and MS evaluators for one split from a config.
+
+    Args:
+        cfg_or_cfg_path: An ExperimentConfig or a path to one.
+        device: Torch device.
+        eval_outdir: Output subdirectory name. Defaults to 'holdout_eval' for
+            the val split and 'test_eval' for the test split.
+        style: Plot style.
+        save_movie: Whether the multi-step runner saves movies.
+        save_mollweide: Whether the multi-step runner saves Mollweide frames.
+        plot_bins: Whether movies of field-level models also draw HEALPix bins (bin-level models always do).
+        data_dir: Override for the feature cache root.
+        action_decoding: 'joint' or 'filter_first'.
+        split: Which split to evaluate, 'val' or 'test'.
+        survey: Survey the lookups, dataset and environment are built for.
+
+    Returns:
+        The single-step and multi-step evaluators.
+    """
     cfg = (
-        load_and_validate(cfg_or_cfg_path, None)
+        load_and_validate(cfg_or_cfg_path)
         if isinstance(cfg_or_cfg_path, str)
         else cfg_or_cfg_path
     )
-    style = style or PlotStyle()
+    style = style or PlotStyle(agent_label=f"{cfg.model.algorithm.name} Agent")
 
     # Resolve the model dir from where the config was loaded
-    if cfg.orig_cfg_path:
-        cfg_dir = Path(cfg.orig_cfg_path).parent
-        outdir = cfg_dir.parent if cfg_dir.name == "configs" else cfg_dir
-    else:
-        outdir = Path(cfg.outdir)
-    ss_outdir = outdir / eval_outdir / 'ss'
-    ms_outdir = outdir / eval_outdir / 'ms'
+    run_paths = RunPaths.from_config(cfg)
+    outdir = run_paths.root
+    eval_dir = run_paths.eval_dir(split) if eval_outdir is None else outdir / eval_outdir
+    ss_outdir = eval_dir / 'ss'
+    ms_outdir = eval_dir / 'ms'
 
     # Checkpoint + normalizers
     checkpoint = get_checkpoint(outdir, device=device)
-    zscore_stats = checkpoint['norm_stats'].get('z_score', {})
-    rel_norm_stats = checkpoint['norm_stats'].get('rel_norm', {})
+    norm_stats = NormStats.from_dict(checkpoint['norm_stats'])
+
+    telescope = survey.telescope
 
     # Load val dataset from cache or reconstruct from feature cache
-    lookups = TrainLookupTables.load_from_dir(DES_DATA_DIR / "lookups")
-    val_cache_path = outdir / "checkpoints" / "val_dataset_cache.pt"
-    _data_dir = Path(data_dir) if data_dir is not None else DES_DATA_DIR
-    is_azel = 'azel' in cfg.data.action_space
-    coord = 'azel' if is_azel else 'radec'
-    feature_cache_dir = _data_dir / f"feature_cache_nside{cfg.data.nside}_{coord}"
+    _data_dir = resolve_data_dir(data_dir if data_dir is not None else cfg.data.data_dir)
+    lookups = TrainLookupTables.load_from_dir(lookups_dir(_data_dir), acceptance=cfg.data.acceptance)
+    logger.info(f"Loaded lookups from {lookups_dir(_data_dir)} (acceptance '{cfg.data.acceptance}')")
+    val_cache_path = run_paths.dataset_cache(split)
+    field_level_cache = is_field_level(cfg.data.action_space)
+    cache_cls = FieldFeatureCache if field_level_cache else BinFeatureCache
+    cache_dir = (field_feature_cache_dir(_data_dir) if field_level_cache
+                 else feature_cache_dir(_data_dir, cfg.data.nside, is_azel=grid_is_azel(cfg.data.action_space)))
 
-    if ValDatasetCache.exists(val_cache_path):
-        val_dataset = ValDatasetCache.load(val_cache_path)
+    if TransitionDatasetCache.exists(val_cache_path):
+        val_dataset = TransitionDatasetCache.load(val_cache_path)
     else:
-        if not RawFeatureCache.exists(feature_cache_dir):
+        if not cache_cls.exists(cache_dir):
             raise FileNotFoundError(
-                f"Neither val dataset cache ({val_cache_path}) nor feature cache "
-                f"({feature_cache_dir}) found."
+                f"Neither {split} dataset cache ({val_cache_path}) nor feature cache "
+                f"({cache_dir}) found."
             )
-        full_cache = RawFeatureCache.load(feature_cache_dir)
-        val_nights = cfg.data.val_nights
-        val_raw_cache = full_cache.filter_nights(val_nights)
+        split_json = run_paths.split_json
+        if NightSplit.exists(split_json):
+            split_nights = NightSplit.load(split_json).nights_for(split)
+        else:
+            split_nights = cfg.data.val_nights if split == 'val' else cfg.data.test_nights
+        if not split_nights:
+            raise ValueError(
+                f"No {split} nights found in {split_json} or in the config; "
+                f"cannot reconstruct the {split} dataset."
+            )
+        full_cache = (FieldFeatureCache.load(cache_dir, mmap=True, acceptance=cfg.data.acceptance)
+                      if field_level_cache
+                      else BinFeatureCache.load(cache_dir, mmap_bin=True, acceptance=cfg.data.acceptance))
+        val_raw_cache = full_cache.filter_nights(split_nights)
         val_dataset = TransitionDataset(
-            mode='test', cache=val_raw_cache, cfg=cfg, lookups=lookups,
-            z_score_stats=zscore_stats, rel_norm_stats=rel_norm_stats,
+            cache=val_raw_cache, cfg=cfg, lookups=lookups,
+            norm_stats=norm_stats, split_role=split, telescope=telescope, survey=survey,
         )
-        ValDatasetCache.from_transition_dataset(val_dataset).save(val_cache_path)
+        TransitionDatasetCache.from_transition_dataset(val_dataset, split=split).save(val_cache_path)
 
     # Build with the dataset's expanded names so filter-dependent features
     # (sky_brightness_g, urgency_r, ...) appear in active_features and can be inverted.
     global_normalizer = build_normalizer(
-        state_feature_names=val_dataset.global_feature_names, cfg=cfg,
+        state_feature_names=val_dataset.global_feature_names, cfg=cfg, survey=survey,
     )
 
     # Agent + runner
@@ -127,28 +165,32 @@ def build_evaluators(
         lookups=lookups,
         field_choice_method='interp',
         device=device,
+        action_decode=action_decoding
     )
     runner = OfflineRunner(
         agent=agent, policy=agent.policy, cfg=cfg,
-        lookups=lookups, num_episodes=1, outdir=ms_outdir,
-        save_SISPI=False, save_state_features=True,
-        save_movie=save_movie, save_mollweide=save_mollweide
+        lookups=lookups, telescope=telescope, outdir=ms_outdir,
+        save_state_features=True,
+        save_movie=save_movie, save_mollweide=save_mollweide, plot_bins=plot_bins,
     )
 
     # Environment for MS evaluator
+    field_level = is_field_level(cfg.data.action_space)
     nightgroup = val_dataset._df.groupby('night')
-    nightgroup = nightgroup.apply(lambda x: x.iloc[1:], include_groups=False).reset_index(level=0).reset_index(drop=True).groupby('night')
+    if not field_level:
+        # Bin runs start each night at the expert's first field; field runs start at the zenith row.
+        nightgroup = nightgroup.apply(lambda x: x.iloc[1:], include_groups=False).reset_index(level=0).reset_index(drop=True).groupby('night')
 
-    night_start_bin_states = None
-    if cfg.data.bin_state_dim > 0:
+    night_start_candidate_states = None
+    if cfg.data.candidate_state_dim > 0 and not field_level:
         cur = val_dataset._df.iloc[val_dataset.current_state_idxs].reset_index(drop=True)
         night_start_indices = cur.index[cur['field'] == 'zenith'].values + 1
-        night_start_bin_states = val_dataset._prenorm_bin_states[night_start_indices].detach().numpy()
+        night_start_candidate_states = val_dataset._prenorm_candidate_states[night_start_indices].detach().numpy()
 
     env = HistoricBlancoEnv(
         cfg=cfg, constraints_cfg=ActionConstraints(), lookups=lookups,
-        global_pd_nightgroup=nightgroup, night_start_bin_states=night_start_bin_states,
-        z_score_stats=zscore_stats, rel_norm_stats=rel_norm_stats,
+        global_pd_nightgroup=nightgroup, night_start_candidate_states=night_start_candidate_states,
+        norm_stats=norm_stats, telescope=telescope, survey=survey, zenith_start=field_level,
     )
 
     # Containers + plotters + evaluators
@@ -156,14 +198,27 @@ def build_evaluators(
     ss_data = SingleStepDataContainer(val_dataset, action_space, lookups,
                                      global_normalizer=global_normalizer)
 
-    ms_data = MultiStepDataContainer(val_dataset, action_space, lookups, z_score_stats=zscore_stats, rel_norm_stats=rel_norm_stats,
+    ms_data = MultiStepDataContainer(val_dataset, action_space, lookups, norm_stats=norm_stats,
                                      global_normalizer=global_normalizer)
 
-    ss_plotter = EvaluationPlotter(ss_outdir, style=style)
-    ms_plotter = EvaluationPlotter(ms_outdir, style=style)
+    ss_plotter = EvaluationPlotter(ss_outdir, style=style, survey=survey)
+    ms_plotter = EvaluationPlotter(ms_outdir, style=style, survey=survey)
+
+    # Precompute per-sample visible-bin masks for filter_first single-step
+    # decoding, aligned to the SS timestamps used for field placement.
+    ss_visible_masks = None
+    if action_decoding == 'filter_first' and is_field_level(action_space):
+        raise ValueError("action_decoding 'filter_first' is not supported for action_space 'field_filter'.")
+    if action_decoding == 'filter_first' and 'filter' in action_space:
+        ss_ts = ss_data.expert_df['timestamp'].to_numpy(dtype=float)
+        ss_visible_masks = np.stack(
+            [env._compute_visible_bin_mask(ts) for ts in ss_ts]
+        )
 
     ss_eval = SingleStepEvaluator(policy=agent.policy, data_container=ss_data,
-                                  plotter=ss_plotter, device=device)
+                                  plotter=ss_plotter, device=device,
+                                  action_decode=action_decoding,
+                                  visible_bin_masks=ss_visible_masks)
     ms_eval = MultiStepEvaluator(runner=runner, env=env, policy=agent.policy,
                                  data_container=ms_data, plotter=ms_plotter, device=device)
     return ss_eval, ms_eval
@@ -197,47 +252,75 @@ class Evaluator(ABC):
         compact_idx = self.data.dataset.curr_compact_idxs[idx]
 
         x_glob = self.data.dataset.states[compact_idx].unsqueeze(0).to(self.device)
-        x_bin  = self.data.dataset.bin_states[compact_idx].unsqueeze(0).to(self.device)
+        x_cand = self.data.dataset.candidate_states[compact_idx].unsqueeze(0).to(self.device)
         self.policy.core_net.to(self.device)
         x_glob.requires_grad_(True)
-        x_bin.requires_grad_(True)
+        x_cand.requires_grad_(True)
 
-        scores = self.policy.core_net(x_glob, x_bin)
+        scores = self.policy.core_net(x_glob, x_cand)
         target = scores[0].max()
         self.policy.core_net.zero_grad()
         target.backward()
 
-        bin_grads = x_bin.grad[0].abs().mean(dim=0)
-        peak = bin_grads.max().item()
-        for i, name in enumerate(self.data.dataset.bin_feature_names):
-            print(f'Feature: {name:30} | Gradient: {bin_grads[i].item() / peak:.6f}')
+        cand_grads = x_cand.grad[0].abs().mean(dim=0)
+        peak = cand_grads.max().item()
+        for i, name in enumerate(self.data.dataset.candidate_feature_names):
+            print(f'Feature: {name:30} | Gradient: {cand_grads[i].item() / peak:.6f}')
 
-    def plot_layer1_weights(self, ax=None):
-        if ax is None:
-            _, ax = plt.subplots(figsize=(20, 5))
-        names = self.data.dataset.global_feature_names + self.data.dataset.bin_feature_names
-        weights = self.policy.core_net.net[0].weight.data.cpu().detach().numpy()
-        means = weights.mean(axis=0)
-        stds  = weights.std(axis=0)
-        xs = np.arange(len(names))
-        ax.errorbar(xs, means[:len(names)], yerr=stds[:len(names)], color='black', fmt='none')
-        ax.scatter(xs, means[:len(names)], color='C0')
-        ax.set_xticks(xs)
-        ax.set_xticklabels(names, rotation=45)
-        return ax
+    # def plot_layer1_weights(self, ax=None):
+    #     if ax is None:
+    #         _, ax = plt.subplots(figsize=(20, 5))
+    #     names = self.data.dataset.global_feature_names + self.data.dataset.candidate_feature_names
+    #     weights = self.policy.core_net.net[0].weight.data.cpu().detach().numpy()
+    #     means = weights.mean(axis=0)
+    #     stds  = weights.std(axis=0)
+    #     xs = np.arange(len(names))
+    #     ax.errorbar(xs, means[:len(names)], yerr=stds[:len(names)], color='black', fmt='none')
+    #     ax.scatter(xs, means[:len(names)], color='C0')
+    #     ax.set_xticks(xs)
+    #     ax.set_xticklabels(names, rotation=45)
+    #     return ax
 
 
     # ---- Common plot pass-throughs ----------------------------------
 
     def plot_mollweide_res(self):
+        expert_df, agent_df = self.data.expert_df, self.data.agent_df
+        times = dict(expert_times=expert_df['timestamp'].to_numpy(), agent_times=agent_df['timestamp'].to_numpy())
+        if not is_field_level(self.data.action_space):
+            self.plotter.plot_mollweide_res(
+                **times,
+                expert_bin_idxs=expert_df['candidate_idx'].to_numpy(),
+                agent_bin_idxs=agent_df['candidate_idx'].to_numpy(),
+                nside=self.data.candidate_grid.nside,
+            )
+            return
         self.plotter.plot_mollweide_res(
-            timestamps=self.data.agent_df['timestamp'].values,
-            expert_bin_idxs=self.data.expert_df['bin_idx'],
-            agent_bin_idxs=self.data.agent_df['bin_idx'],
-            field_pos=np.array([(self.data.lookups.fields.ra[fid], self.data.lookups.fields.dec[fid])
-                                for fid in range(len(self.data.lookups.fields.index))]),
-            nside=self.data.hpGrid.nside,
+            **times,
+            expert_field_pos=self._field_radec(expert_df['candidate_idx'].to_numpy()),
+            agent_field_pos=self._field_radec(agent_df['candidate_idx'].to_numpy()),
         )
+
+    def _field_radec(self, field_ids):
+        """Field centers in radians, NaN for the zenith sentinel (the DataFrame ra/dec columns are in degrees).
+
+        Parameters
+        ----------
+        field_ids : np.ndarray
+            Field id per observation, ZENITH_FIELD_ID (-1) for zenith rows.
+
+        Returns
+        -------
+        np.ndarray
+            (n_obs, 2) (ra, dec) in radians.
+        """
+        fields = self.data.lookups.fields
+        ids = np.asarray(field_ids, dtype=int)                 # [n_obs]
+        valid = ids >= 0
+        pos = np.full((len(ids), 2), np.nan)                   # [n_obs, 2]
+        pos[valid, 0] = fields['ra'].to_numpy()[ids[valid]]
+        pos[valid, 1] = fields['dec'].to_numpy()[ids[valid]]
+        return pos
 
     def plot_hist_comparison(self, feature_name, density=True, bins=20, use_weights=False, ax=None):
         return self.plotter.plot_hist_comparison(
@@ -248,12 +331,13 @@ class Evaluator(ABC):
         )
 
 
-    def plot_2dhist(self, feature_x: str, feature_y: str, bins=25):
+    def plot_2dhist(self, feature_x: str, feature_y: str, bins=25, normalization='density'):
         return self.plotter.plot_2dhist(
             feature_x, feature_y,
             self.data.expert_df[feature_x].values, self.data.expert_df[feature_y].values,
             self.data.agent_df[feature_x].values,  self.data.agent_df[feature_y].values,
             bins=bins,
+            normalization=normalization,
         )
 
     def plot_2dhist_res(self, feature_x, feature_y, bins=25, label_fontsize=20, normalization='counts'):
@@ -266,20 +350,36 @@ class Evaluator(ABC):
             normalization=normalization,
         )
 
-    def plot_2dhist_per_filter(self, feature_x, feature_y, bins=25, density=True):
-        for filt in FILTER2IDX.keys():
+    def plot_2dhist_per_filter(self, feature_x, feature_y, bins=25, normalization='density'):
+        """Plot one expert/agent 2D histogram figure per filter.
+
+        Args:
+            feature_x: Column plotted on the x axis.
+            feature_y: Column plotted on the y axis.
+            bins: Number of bins per axis.
+            normalization: One of 'counts', 'density' or 'probability', applied
+                within each filter so panels are comparable across filters.
+
+        Returns:
+            Dict mapping filter name to the figure drawn for that filter.
+        """
+        figs = {}
+        for filt in self.data.lookups.survey.filters:
             exp_f_mask = self.data.expert_df['filter'].values == filt
             agent_f_mask = self.data.agent_df['filter'].values == filt
-            self.plotter.plot_2dhist(
+            fig, _ = self.plotter.plot_2dhist(
                 feature_x=feature_x,
                 feature_y=feature_y,
                 expert_x=self.data.expert_df[feature_x][exp_f_mask],
                 expert_y=self.data.expert_df[feature_y][exp_f_mask],
                 agent_x=self.data.agent_df[feature_x][agent_f_mask],
                 agent_y=self.data.agent_df[feature_y][agent_f_mask],
-                density=density
+                bins=bins,
+                normalization=normalization
             )
-            plt.suptitle(f'{filt}-band', fontsize=16)
+            fig.suptitle(f'{filt}-band', fontsize=16)
+            figs[filt] = fig
+        return figs
 
     # ---- Plotter independent plots ----------------------------------
 
@@ -351,7 +451,7 @@ class Evaluator(ABC):
 
     def plot_violin_per_filter(self, key_metric='moon_el'):
         expert_df = self.data.expert_df.assign(source='Expert')
-        agent_df  = self.data.agent_df.assign(source='BC Agent')
+        agent_df  = self.data.agent_df.assign(source=self.plotter.style.agent_label)
 
         combined_df = pd.concat(
             [expert_df[[key_metric, 'filter', 'source']],
@@ -361,19 +461,20 @@ class Evaluator(ABC):
         self.plotter.plot_violin_per_filter(combined_df, key_metric=key_metric)
 
     def plot_metric_distributions(self):
-        metrics = ['airmass', 'ha', 'slew_dist']
+        metrics = ['airmass', 'slew_dist']
 
         expert_df = self.data.expert_df.copy()
         agent_df = self.data.agent_df.copy()
-        expert_df['ha'] /= units.deg
-        agent_df['ha'] /= units.deg
+        for _df in (expert_df, agent_df):
+            if 'ha' in _df.columns:
+                _df['ha'] /= units.deg
 
         # Remove slew distances > 35 degrees (arbitrary cutoff) # XXX need to check train data construction
         expert_df['slew_dist'] = expert_df['slew_dist'].where(expert_df['slew_dist'] < 10, np.nan)
         agent_df['slew_dist'] = agent_df['slew_dist'].where(agent_df['slew_dist'] < 10, np.nan)
 
-        expert_df = expert_df[metrics].assign(source='Expert')
-        agent_df  = agent_df[metrics].assign(source='BC Agent')
+        expert_df = expert_df[metrics].assign(source='DES')
+        agent_df  = agent_df[metrics].assign(source=self.plotter.style.agent_label)
 
         # 3. Combine into a single long-format DataFrame
         combined_df = pd.concat([expert_df, agent_df], ignore_index=True)
@@ -396,15 +497,20 @@ class SingleStepEvaluator(Evaluator):
 
     def __init__(self, policy, data_container: SingleStepDataContainer,
                  plotter: EvaluationPlotter, device: str = 'cuda',
-                 field_choice_method: str = 'interp'):
+                 field_choice_method: str = 'interp',
+                 action_decode: str = 'joint', visible_bin_masks=None):
         super().__init__(policy, data_container, plotter, device)
         self.field_choice_method = field_choice_method
+        self.action_decode = action_decode
+        # [n_states, n_bins] bool, aligned to dataset.curr_compact_idxs order;
+        # required for filter_first decoding, unused otherwise.
+        self.visible_bin_masks = visible_bin_masks
 
     def run(self) -> None:
-        agent_bin_idxs, agent_filter_idxs, agent_field_ids = self._batch_single_step()
+        agent_cand_idxs, agent_filter_idxs, agent_field_ids = self._batch_single_step()
         timestamps = self.data.expert_df['timestamp'].astype(int)
 
-        self.data.populate_agent_df(agent_bin_idxs, agent_filter_idxs, timestamps,
+        self.data.populate_agent_df(agent_cand_idxs, agent_filter_idxs, timestamps,
                                     field_ids=agent_field_ids)
         # IMPORTANT: convert agent_df to deg BEFORE computing errors so both
         # dataframes share units inside populate_errors_df.
@@ -418,49 +524,74 @@ class SingleStepEvaluator(Evaluator):
         chunk = len(compact_idxs) // n_slices
         action_outputs = []
         score_outputs  = []
+        ff_bin_outputs = []
+        ff_filter_outputs = []
 
         dataset = self.data.dataset
+        num_filters = self.data.lookups.survey.num_filters
+
+        do_filter = has_filter(self.data.action_space)
+        field_level = is_field_level(self.data.action_space)
+        filter_first = (self.action_decode == 'filter_first' and do_filter
+                        and self.visible_bin_masks is not None)
+        need_scores = (self.field_choice_method == 'interp' and not field_level) or filter_first
 
         for i in range(n_slices):
             sl = slice(i * chunk, None if i == n_slices - 1 else (i + 1) * chunk)
             idxs = compact_idxs[sl]
             glob  = dataset.states[idxs].to(self.device)
-            bins  = dataset.bin_states[idxs].to(self.device) if dataset.include_bin_features else None
+            cands = dataset.candidate_states[idxs].to(self.device) if dataset.include_candidate_features else None
             masks = dataset.action_masks[idxs].to(self.device)
             with torch.no_grad():
-                action_outputs.append(self.policy.select_action(glob, bins, masks))
-                if self.field_choice_method == 'interp':
-                    score_outputs.append(self.policy.core_net(glob, bins).cpu())
+                scores = self.policy.core_net(glob, cands) if need_scores else None
+                if filter_first:
+                    visible = torch.as_tensor(
+                        self.visible_bin_masks[sl], device=self.device, dtype=torch.bool
+                    )
+                    b_idx, f_idx = filter_first_decode(scores, masks, visible, num_filters)
+                    ff_bin_outputs.append(b_idx.cpu())
+                    ff_filter_outputs.append(f_idx.cpu())
+                else:
+                    action_outputs.append(self.policy.select_action(glob, cands, masks))
+                if self.field_choice_method == 'interp' and not field_level:
+                    score_outputs.append(scores.cpu())
 
-        bin_idxs = torch.cat(action_outputs).cpu().detach().numpy()
-        if 'filter' in self.data.action_space:
-            filter_idxs = bin_idxs % _NUM_FILTERS
-            bin_idxs    = bin_idxs // _NUM_FILTERS
+        if filter_first:
+            cand_idxs   = torch.cat(ff_bin_outputs).numpy()
+            filter_idxs = torch.cat(ff_filter_outputs).numpy()
         else:
-            filter_idxs = None
+            cand_idxs = torch.cat(action_outputs).cpu().detach().numpy()
+            if do_filter:
+                filter_idxs = cand_idxs % num_filters
+                cand_idxs   = cand_idxs // num_filters
+            else:
+                filter_idxs = None
 
-        # Log active-bin coverage diagnostic (fraction of bins with no sentinel features)
-        active_bin_mask = getattr(dataset, 'active_bin_mask', None)
-        if active_bin_mask is not None:
+        # Log active-candidate coverage diagnostic (fraction of candidates with no sentinel features)
+        active_candidate_mask = getattr(dataset, 'active_candidate_mask', None)
+        if active_candidate_mask is not None:
             logger.debug(
-                f"Active bin coverage: {float(active_bin_mask.float().mean()):.3f}"
+                f"Active candidate coverage: {float(active_candidate_mask.float().mean()):.3f}"
             )
 
+        if field_level:
+            # Candidates are fields: the chosen candidate index is the field id.
+            return cand_idxs, filter_idxs, cand_idxs
         if self.field_choice_method != 'interp':
-            return bin_idxs, filter_idxs, None
+            return cand_idxs, filter_idxs, None
 
         field_ids = self._choose_fields_interp(
-            bin_idxs, filter_idxs, torch.cat(score_outputs).numpy(),
+            cand_idxs, filter_idxs, torch.cat(score_outputs).numpy(),
         )
-        return bin_idxs, filter_idxs, field_ids
+        return cand_idxs, filter_idxs, field_ids
 
     def _choose_fields_interp(self, bin_idxs, filter_idxs, all_scores):
         """For each chosen bin, pick the best field via Q-value interpolation."""
-        n_bins    = self.data.dataset.nbins
+        n_bins    = self.data.dataset.n_candidates
         n_filters = all_scores.shape[-1] // n_bins
-        lon_data  = self.data.hpGrid.lon
-        lat_data  = self.data.hpGrid.lat
-        is_azel   = self.data.hpGrid.is_azel
+        lon_data  = self.data.candidate_grid.lon
+        lat_data  = self.data.candidate_grid.lat
+        is_azel   = self.data.candidate_grid.is_azel
 
         fids_all = self.data.lookups.fields.index.values
         ra_all   = self.data.lookups.fields['ra'].values
@@ -472,7 +603,7 @@ class SingleStepEvaluator(Evaluator):
         # Precompute static bin→fields map for equatorial grids.
         static_map = None
         if not is_azel:
-            bids = self.data.hpGrid.ang2idx(lon=ra_all, lat=dec_all)
+            bids = self.data.candidate_grid.ang2idx(lon=ra_all, lat=dec_all)
             static_map = defaultdict(list)
             for fid, bid in zip(fids_all, bids):
                 static_map[int(bid)].append(int(fid))
@@ -487,7 +618,7 @@ class SingleStepEvaluator(Evaluator):
             if is_azel:
                 # Project all field RA/Dec to az/el at this observation's timestamp.
                 az_all, el_all = _ephemerides.equatorial_to_topographic(ra_all, dec_all, time=float(ts))
-                bids_j = self.data.hpGrid.ang2idx(lon=az_all, lat=el_all)
+                bids_j = self.data.candidate_grid.ang2idx(lon=az_all, lat=el_all)
                 bin_map_j = defaultdict(list)
                 for fid, b in zip(fids_all, bids_j):
                     if b is not None:  # field not observable at this timestamp
@@ -553,8 +684,9 @@ class SingleStepEvaluator(Evaluator):
             plot_type=plot_type, bins=bins, alpha=alpha, density=density, ax=ax,
         )
 
-    def plot_cdf_pointing_error(self, per_filter=False, use_bin=False):
-        return self.plotter.plot_cdf_pointing_error(self.data.expert_df, self.data.errors_df, per_filter=per_filter, use_bin=use_bin)
+    def plot_cdf_pointing_error(self, per_filter=False, use_candidate=False):
+        return self.plotter.plot_cdf_pointing_error(self.data.expert_df, self.data.errors_df, per_filter=per_filter,
+                                                    use_candidate=use_candidate)
 
     def plot_quiver(self, feature_x, feature_y, ax=None):
         self._check_input_features(feature_x, feature_y)
@@ -581,15 +713,16 @@ class SingleStepEvaluator(Evaluator):
 
 
     def calculate_filter_confusion(self) -> np.ndarray:
-        n = len(FILTER2IDX)
+        filter2idx = self.data.lookups.survey.filter2idx
+        n = len(filter2idx)
         conf_mat = np.zeros((n, n))
-        for filt, idx in FILTER2IDX.items():
+        for filt, idx in filter2idx.items():
             mask = self.data.expert_df['filter_idx'].values == idx
             ag = self.data.agent_df['filter'].values[mask]
             total = mask.sum()
             if total == 0:
                 continue
-            for _fname, _fidx in FILTER2IDX.items():
+            for _fname, _fidx in filter2idx.items():
                 conf_mat[idx, _fidx] = (ag == _fname).sum() / total
         return conf_mat
 
@@ -625,19 +758,51 @@ class MultiStepEvaluator(Evaluator):
                 self.eval_metrics = pickle.load(f)
                 logger.info(f"Results already exist in {metrics_path}. \
                             Pass overwrite=True to re-run.")
+            if self.runner.save_movie:
+                self._save_missing_movies()
         else:
             self.eval_metrics = self.runner.run(env=self.env)
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             with open(metrics_path, 'wb') as f:
                 pickle.dump(self.eval_metrics, f)
 
-        ts, bin_idxs, filter_idxs, field_ids, glob_df, bin_feat_dict = \
+        ts, bin_idxs, filter_idxs, field_ids, glob_df, candidate_feat_dict = \
             self._process_eval_metrics(self.eval_metrics)
 
+        # Field candidates are indexed by field id; the schedule's bin is grid bookkeeping only.
+        candidate_idxs = field_ids if is_field_level(self.data.action_space) else bin_idxs
         self.data.populate_agent_df(
-            bin_idxs=bin_idxs, filter_idxs=filter_idxs, timestamps=ts,
-            field_ids=field_ids, glob_df=glob_df, bin_feat_dict=bin_feat_dict,
+            candidate_idxs=candidate_idxs, filter_idxs=filter_idxs, timestamps=ts,
+            field_ids=field_ids, glob_df=glob_df, candidate_feat_dict=candidate_feat_dict,
         )
+
+    def _local_manifest(self, manifest: dict) -> dict:
+        """Resolve manifest paths by basename under <outdir>/nights.
+
+        The manifest may store absolute paths from the training machine; the
+        night CSV/npz files always live in <outdir>/nights with these basenames.
+
+        Parameters
+        ----------
+        manifest : dict
+            Night key -> stored night CSV path (None for an empty night).
+
+        Returns
+        -------
+        dict
+            Night key -> local night CSV path (None for an empty night).
+        """
+        nights_dir = OfflineRunPaths(self.outdir).nights
+        return {k: (nights_dir / Path(v).name) if v is not None else None
+                for k, v in manifest.items()}
+
+    def _save_missing_movies(self) -> None:
+        """Render movies for cached nights that have none, from the night CSVs."""
+        episode = self.eval_metrics['ep-0']
+        if not (isinstance(episode, dict) and 'manifest' in episode):
+            logger.warning("Cached eval_metrics has no night manifest; cannot render movies from CSVs.")
+            return
+        self.runner.save_missing_movies(self._local_manifest(episode['manifest']))
 
     def _process_eval_metrics(self, eval_metrics):
         # Deterministic eval: single episode.
@@ -681,11 +846,11 @@ class MultiStepEvaluator(Evaluator):
         glob_df['night'] = night_col
         del glob_arr
 
-        # Bin features: stream per feature to avoid holding a full
-        # (nfeats, total_rows, nbins) intermediate AND a full per-feature
+        # Candidate features: stream per feature to avoid holding a full
+        # (nfeats, total_rows, n_candidates) intermediate AND a full per-feature
         # dict at the same time.
-        feat_names = self.data.dataset.bin_feature_names
-        bin_feat_dict = {}
+        feat_names = self.data.dataset.candidate_feature_names
+        candidate_feat_dict = {}
         # Materialize the full (total_rows, nbins, nfeats) array once in float32
         # — we still need it, but at least at fp32 not fp64.
         bin_obs_all = np.concatenate(
@@ -702,7 +867,7 @@ class MultiStepEvaluator(Evaluator):
 
         for i, name in enumerate(feat_names):
             # arr[valid, :, i] copies; assign and move on.
-            bin_feat_dict[name] = bin_obs_all[valid, :, i].copy()
+            candidate_feat_dict[name] = bin_obs_all[valid, :, i].copy()
         del bin_obs_all
         _gc.collect()
 
@@ -712,7 +877,7 @@ class MultiStepEvaluator(Evaluator):
             filter_arr[valid],
             field_arr[valid],
             glob_df[valid],
-            bin_feat_dict,
+            candidate_feat_dict,
         )
 
     def _process_eval_metrics_from_manifest(self, manifest):
@@ -728,31 +893,26 @@ class MultiStepEvaluator(Evaluator):
 
         night_keys = [k for k in manifest if manifest[k] is not None]
 
-        # The manifest may store absolute paths from the training machine; the
-        # night CSV/npz files always live in <outdir>/nights with these
-        # basenames, so resolve by basename to stay portable across machines.
-        nights_dir = self.outdir / 'nights'
-        manifest = {k: (nights_dir / Path(v).name) if v is not None else None
-                    for k, v in manifest.items()}
+        manifest = self._local_manifest(manifest)
 
         # ---- Pass 1: scalars from per-night CSVs ----
         frames = []
         for n in night_keys:
-            df = pd.read_csv(manifest[n])
+            df = read_schedule_csv(manifest[n])
             df['_night_key'] = n
             frames.append(df)
 
         full_df    = pd.concat(frames, ignore_index=True)
-        ts_arr     = full_df[SCHEDULE_KEYS['timestamp']].values
-        bin_arr    = full_df[SCHEDULE_KEYS['bin_id']].values
-        filter_arr = full_df[SCHEDULE_KEYS['filter_idx']].values
-        field_arr  = full_df[SCHEDULE_KEYS['field_id']].values
+        ts_arr     = full_df['timestamp'].values
+        bin_arr    = full_df['bin_id'].values
+        filter_arr = full_df['filter_idx'].values
+        field_arr  = full_df['field_id'].values
         night_col  = full_df['_night_key'].values
         n_rows     = len(ts_arr)
         del frames, full_df
 
         feat_names_glob = self.data.dataset.global_feature_names
-        feat_names_bin  = self.data.dataset.bin_feature_names
+        feat_names_cand = self.data.dataset.candidate_feature_names
 
         # ---- Pass 2: obs features from companion _obs.npz files ----
         # Path convention: nights/ep-N_night-K.csv → nights/ep-N_night-K_obs.npz
@@ -772,27 +932,29 @@ class MultiStepEvaluator(Evaluator):
         glob_df['night'] = night_col
         del glob_arr
 
-        # ---- Pass 2b: bin_observations, streamed per night ----
+        # ---- Pass 2b: candidate_observations, streamed per night ----
+        # Runs written before the bin -> candidate rename store them as bin_observations
         with np.load(first_npz, mmap_mode='r') as npz:
-            nbins = npz['bin_observations'].shape[1]
-        bin_feat_dict = {
-            name: np.empty((n_rows, nbins), dtype=np.float32)
-            for name in feat_names_bin
+            cand_key = 'candidate_observations' if 'candidate_observations' in npz else 'bin_observations'
+            n_candidates = npz[cand_key].shape[1]
+        candidate_feat_dict = {
+            name: np.empty((n_rows, n_candidates), dtype=np.float32)
+            for name in feat_names_cand
         }
         row_offset = 0
         for n in night_keys:
             npz_path = Path(manifest[n])
             npz_path = npz_path.parent / (npz_path.stem + '_obs.npz')
             with np.load(npz_path) as npz:
-                bin_obs = np.asarray(npz['bin_observations'], dtype=np.float32)
-            n_night = bin_obs.shape[0]
-            for i, name in enumerate(feat_names_bin):
-                bin_feat_dict[name][row_offset:row_offset + n_night] = bin_obs[:, :, i]
-            del bin_obs
+                cand_obs = np.asarray(npz[cand_key], dtype=np.float32)
+            n_night = cand_obs.shape[0]
+            for i, name in enumerate(feat_names_cand):
+                candidate_feat_dict[name][row_offset:row_offset + n_night] = cand_obs[:, :, i]
+            del cand_obs
             row_offset += n_night
             _gc.collect()
 
-        return ts_arr, bin_arr, filter_arr, field_arr, glob_df, bin_feat_dict
+        return ts_arr, bin_arr, filter_arr, field_arr, glob_df, candidate_feat_dict
 
     # ---- MS-specific plots ------------------------------------------
 
@@ -853,14 +1015,13 @@ def plot_metric_distributions_with_ss_overlay(
 
     fig, axs = ms_evaluator.plot_metric_distributions()
 
-    metrics = ['airmass', 'ha', 'slew_dist']
+    metrics = ['airmass', 'slew_dist']
     ss_agent_df  = ss_evaluator.data.agent_df.copy()
 
     if 'ha' in ss_agent_df.columns:
         ss_agent_df['ha'] = ss_agent_df['ha'] / units.deg
     if 'slew_dist' in ss_agent_df.columns:
         ss_agent_df['slew_dist']  = ss_agent_df['slew_dist'].where(ss_agent_df['slew_dist']  < 10, np.nan)
-
     SS_COLOR = 'black'
     SS_STYLE = 'solid'
     SS_LW = 2

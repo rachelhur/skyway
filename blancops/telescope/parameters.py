@@ -1,38 +1,40 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+import numpy as np
 
 
 @dataclass(frozen=True)
 class SlewModel:
+    """Linear fit to slew. All values in degrees and seconds.
+
+    Parameters
+    ----------
+    rate : float
+        Slew time per degree of on-sky distance (sec/deg)
+    intercept : float
+        Intercept of the linear fit (sec).
     """
-    Kinematic slew model for a single axis (azimuth or altitude).
 
-    Assumes constant acceleration to max_speed, cruise at max_speed, then
-    symmetric deceleration.  For short moves that never reach max_speed the
-    formula collapses to the pure-acceleration case.
+    rate: float
+    intercept: float
 
-    All values in degrees and seconds.
-    """
+    def slew_time(self, distance: float | np.ndarray) -> float | np.ndarray:
+        """Slew time between exposures: intercept + rate * d.
 
-    max_speed: float    # deg / s  — peak angular velocity
-    acceleration: float # deg / s² — constant accel / decel magnitude
+        Parameters
+        ----------
+        distance : float or np.ndarray
+            On-sky slew distance in degrees.
 
-    def slew_time(self, distance: float) -> float:
+        Returns
+        -------
+        float or np.ndarray
+            Slew time in seconds, same shape as distance.
         """
-        Seconds required to move `distance` degrees on this axis.
-        distance must be non-negative (pass abs(delta) at the call site).
-        """
-        if distance <= 0.0:
-            return 0.0
-        # Distance covered while accelerating to full speed (and decelerating back)
-        accel_dist = self.max_speed ** 2 / self.acceleration
-        if distance <= accel_dist:
-            # Triangular profile — never reaches max_speed
-            return 2.0 * math.sqrt(distance / self.acceleration)
-        # Trapezoidal profile — reach max_speed and cruise
-        return distance / self.max_speed + self.max_speed / self.acceleration
+        return self.intercept + self.rate * distance
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,7 @@ class TelescopeParameters:
     instrument combination.
 
     Timing convention (per visit):
-        total_time = exposure + readout + shutter_overhead [+ filter_change]
+        total_time = exposure + max(readout + overhead [+ filter_change], slew)
 
     All times in seconds, all angles in degrees.
     """
@@ -50,15 +52,14 @@ class TelescopeParameters:
     # ------------------------------------------------------------------ #
     # Slew                                                                 #
     # ------------------------------------------------------------------ #
-    az_slew: SlewModel
-    alt_slew: SlewModel
+    slew: SlewModel | None
 
     # ------------------------------------------------------------------ #
     # Instrument timing                                                    #
     # ------------------------------------------------------------------ #
     readout_time: float         # seconds — detector readout after each exposure
-    filter_change_time: float   # seconds — time to rotate filter wheel / changer
-    shutter_overhead: float     # seconds — open + close per exposure
+    overhead_time: float        # seconds — other fixed per-exposure overhead
+    # shutter_overhead: float     # seconds — open + close per exposure
 
     # ------------------------------------------------------------------ #
     # Field of view                                                        #
@@ -75,6 +76,13 @@ class TelescopeParameters:
     # Filter complement                                                    #
     # ------------------------------------------------------------------ #
     filters: tuple[str, ...]    # ordered tuple of available filter names
+    filter_wavelengths: dict[str, float] = field(default_factory=dict)  # nm, per installed filter a survey uses
+    filter_wave_norm: float = 1000.0  # nm, divisor that scales wavelengths into features
+
+    # ------------------------------------------------------------------ #
+    # Filter change                                                        #
+    # ------------------------------------------------------------------ #
+    filter_change_time: float = 0.0  # seconds
 
     # ------------------------------------------------------------------ #
     # Derived properties                                                   #
@@ -86,32 +94,44 @@ class TelescopeParameters:
         return math.pi * (self.fov_deg / 2.0) ** 2
 
     # ------------------------------------------------------------------ #
-    # Slew time                                                            #
-    # ------------------------------------------------------------------ #
-
-    def slew_time(self, daz: float, dalt: float) -> float:
-        """
-        Total slew time for a simultaneous az + alt move.
-        Both axes move at the same time; the total is the slower axis.
-        """
-        return max(
-            self.az_slew.slew_time(abs(daz)),
-            self.alt_slew.slew_time(abs(dalt)),
-        )
-
-    # ------------------------------------------------------------------ #
     # Per-visit overhead                                                   #
     # ------------------------------------------------------------------ #
 
-    def visit_overhead(self, filter_change: bool = False) -> float:
+    def visit_overhead(self, filter_change: bool | np.ndarray = False) -> float | np.ndarray:
+        """Fixed per-visit overhead: readout + overhead [+ filter_change]. Excludes slew time.
+
+        Parameters
+        ----------
+        filter_change : bool or np.ndarray
+            Whether the filter changes between the two exposures.
+
+        Returns
+        -------
+        float or np.ndarray
+            Overhead in seconds, same shape as filter_change.
         """
-        Fixed per-visit overhead in seconds (readout + shutter, optionally
-        including a filter change).  Does not include slew time.
+        return self.readout_time + self.overhead_time + self.filter_change_time * filter_change
+
+    def dead_time(
+        self, distance: float | np.ndarray, filter_change: bool | np.ndarray = False
+    ) -> float | np.ndarray:
+        """Time between finished consecutive exposure finish to start time: max(visit_overhead, slew_time(d)).
+
+        Parameters
+        ----------
+        distance : float or np.ndarray
+            On-sky slew distance in degrees.
+        filter_change : bool or np.ndarray
+            Whether the filter changes between the two exposures.
+
+        Returns
+        -------
+        float or np.ndarray
+            Dead time in seconds, broadcast over distance and filter_change.
         """
-        total = self.readout_time + self.shutter_overhead
-        if filter_change:
-            total += self.filter_change_time
-        return total
+        if self.slew is None:
+            raise ValueError("No SlewModel fitted for this telescope; dead_time is undefined.")
+        return np.maximum(self.visit_overhead(filter_change), self.slew.slew_time(distance))
 
     def __repr__(self) -> str:
         return (

@@ -3,7 +3,7 @@ import torch
 
 from blancops.configs.enums import Algorithm
 from blancops.ephemerides.ephemerides import HealpixGrid
-from blancops.rl.algorithms.base import AlgorithmBase
+from blancops.rl.algorithms.base import AlgorithmBase, q_value_metrics
 
 import logging
 logger = logging.getLogger(__name__)
@@ -61,27 +61,27 @@ class DDQN(AlgorithmBase):
     def _unpack_batch(self, batch) -> dict:
         
         (state, actions_flat, rewards, next_state, 
-         dones, action_masks, next_action_masks, bin_states, next_bin_states, slew_dists) = batch
+         dones, action_masks, next_action_masks, candidate_states, next_candidate_states, slew_dists) = batch
 
         return {
-            "state":             self._to_dev(state, torch.float32),
-            "next_state":        self._to_dev(next_state, torch.float32),
-            "bin_states":        self._to_dev(bin_states, torch.float32),
-            "next_bin_states":   self._to_dev(next_bin_states, torch.float32),
-            "actions":           self._to_dev(actions_flat, torch.long).unsqueeze(1),
-            "rewards":           self._to_dev(rewards, torch.float32),
-            "dones":             self._to_dev(dones, torch.float32),
-            "action_masks":      self._to_dev(action_masks, torch.bool),
-            "next_action_masks": self._to_dev(next_action_masks, torch.bool),
+            "state":                 self._to_dev(state, torch.float32),
+            "next_state":            self._to_dev(next_state, torch.float32),
+            "candidate_states":      self._to_dev(candidate_states, torch.float32),
+            "next_candidate_states": self._to_dev(next_candidate_states, torch.float32),
+            "actions":               self._to_dev(actions_flat, torch.long).unsqueeze(1),
+            "rewards":               self._to_dev(rewards, torch.float32),
+            "dones":                 self._to_dev(dones, torch.float32),
+            "action_masks":          self._to_dev(action_masks, torch.bool),
+            "next_action_masks":     self._to_dev(next_action_masks, torch.bool),
         }
 
-    def _compute_loss(self, batch_dict, hpGrid=None, compute_metrics=False):
+    def _compute_loss(self, batch_dict, candidate_grid=None, compute_metrics=False):
         q_vals_all, q_val, q_expected = self._forward_q(batch_dict)
         loss = self._td_loss(q_val, q_expected)
 
         metrics = {}
         if compute_metrics:
-            metrics = self._build_metrics(q_vals_all, q_val, q_expected, batch_dict, hpGrid)
+            metrics = self._build_metrics(q_vals_all, q_val, q_expected, batch_dict, candidate_grid)
         return loss, metrics
 
     def _post_step(self) -> None:
@@ -93,29 +93,29 @@ class DDQN(AlgorithmBase):
 
     def _forward_q(self, batch_dict):
         """Forward pass: current Q values, taken-action Q, and TD target."""
-        state           = batch_dict["state"]
-        bin_states      = batch_dict["bin_states"]
-        next_state      = batch_dict["next_state"]
-        next_bin_states = batch_dict["next_bin_states"]
-        actions         = batch_dict["actions"]
-        rewards         = batch_dict["rewards"]
-        dones           = batch_dict["dones"]
-        next_masks      = batch_dict["next_action_masks"]
+        state                 = batch_dict["state"]
+        candidate_states      = batch_dict["candidate_states"]
+        next_state            = batch_dict["next_state"]
+        next_candidate_states = batch_dict["next_candidate_states"]
+        actions               = batch_dict["actions"]
+        rewards               = batch_dict["rewards"]
+        dones                 = batch_dict["dones"]
+        next_masks            = batch_dict["next_action_masks"]
 
-        q_vals_all = self.policy.get_q_values(state, bin_states)
+        q_vals_all = self.policy.get_q_values(state, candidate_states)
         q_val = q_vals_all.gather(1, actions).squeeze(1)
 
         with torch.no_grad():
             if self.use_double:
-                q_vals_next = self.policy.get_q_values(next_state, next_bin_states)
+                q_vals_next = self.policy.get_q_values(next_state, next_candidate_states)
                 mask_val = torch.finfo(q_vals_next.dtype).min
                 q_vals_next = q_vals_next.masked_fill(~next_masks, mask_val)
                 a_best = q_vals_next.argmax(1)
 
-                target_q_next = self.target_net.get_q_values(next_state, next_bin_states)
+                target_q_next = self.target_net.get_q_values(next_state, next_candidate_states)
                 target_q_state = target_q_next.gather(1, a_best.unsqueeze(1)).squeeze(1)
             else:
-                next_q = self.target_net.get_q_values(next_state, next_bin_states)
+                next_q = self.target_net.get_q_values(next_state, next_candidate_states)
                 mask_val = torch.finfo(next_q.dtype).min
                 next_q = next_q.masked_fill(~next_masks, mask_val)
                 target_q_state = next_q.max(dim=1)[0]
@@ -127,7 +127,7 @@ class DDQN(AlgorithmBase):
     def _td_loss(self, q_val, q_expected) -> torch.Tensor:
         return self.loss_function(q_val, q_expected)
 
-    def _build_metrics(self, q_vals_all, q_val, q_expected, batch_dict, hpGrid):
+    def _build_metrics(self, q_vals_all, q_val, q_expected, batch_dict, candidate_grid):
         actions = batch_dict["actions"]
         action_masks = batch_dict["action_masks"]
 
@@ -148,14 +148,14 @@ class DDQN(AlgorithmBase):
             "td_error": (q_val - q_expected).abs().mean().item(),
             "td_loss":  self._td_loss(q_val, q_expected).item(),
             "q_std":    q_vals_all.std().item(),
-            "q_policy": q_vals_all.max(dim=1)[0].mean().item(),
             "q_expert": q_val.mean().item(),
             "accuracy": (predicted_actions == expert_squeezed).float().mean().item(),
+            **q_value_metrics(q_vals_all, q_val, q_expected, action_masks),
         }
 
-        if hpGrid is not None:
+        if candidate_grid is not None:
             heavy = self.policy.compute_heavy_metrics(
-                predicted_actions, expert_squeezed, hpGrid, self.policy.num_filters
+                predicted_actions, expert_squeezed, candidate_grid, self.policy.num_filters
             )
             metrics.update(heavy)
         return metrics

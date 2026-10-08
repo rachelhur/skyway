@@ -16,6 +16,7 @@ from blancops.plotting.plotting import plot_schedule_from_file
 from collections import defaultdict
 from blancops.ephemerides.ephemerides import topographic_to_equatorial
 from blancops.math import units
+from blancops.configs.enums import grid_is_azel
 
 def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_ortho, action_space, nside, fid2radec_filepath):
     if do_fieldbin:
@@ -28,7 +29,7 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
             whole=False,
             compare=False,
             expert=False,
-            is_azel='azel' in action_space,
+            is_azel=grid_is_azel(action_space),
             mollweide=False,
         )
     if do_bin:
@@ -41,9 +42,9 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
             whole=False,
             compare=False,
             expert=False,
-            is_azel='azel' in action_space,
+            is_azel=grid_is_azel(action_space),
             mollweide=False,
-        ) 
+        )
 
         if action_space == 'radec':
             if do_mollefield:
@@ -58,9 +59,9 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
                     whole=True,
                     compare=True,
                     expert=True,
-                    is_azel='azel' in action_space,
+                    is_azel=grid_is_azel(action_space),
                     mollweide=True,
-                )  
+                )
             if do_ortho:
                 plot_schedule_from_file(
                     outfile=save_dir / "ortho.png",
@@ -71,25 +72,25 @@ def save_gifs(schedule_path, save_dir, do_fieldbin, do_bin, do_mollefield, do_or
                     whole=True,
                     compare=True,
                     expert=True,
-                    is_azel='azel' in action_space,
+                    is_azel=grid_is_azel(action_space),
                     mollweide=False,
-                )  
+                )
 
 def save_survey_diagnostics(eval_metrics, save_dir, field_lookup, nside, action_space, ep_num=0):
     eval_metrics = eval_metrics[f'ep-{ep_num}']
     _preflat_metrics = defaultdict(list)
-    hpGrid = HealpixGrid(nside=nside, is_azel='azel' in action_space)
+    hpGrid = HealpixGrid(nside=nside, is_azel=grid_is_azel(action_space))
 
     # Extract the arrays from each night
     for night_key, metrics_dict in eval_metrics.items():
         for metric_name, array_values in metrics_dict.items():
             _preflat_metrics[metric_name].append(array_values)
-            
+
     # Concatenate the collected arrays for each metric
     survey_metrics = {}
     for k, list_of_arrays in _preflat_metrics.items():
         survey_metrics[k] = np.concatenate(list_of_arrays)
-    
+
     # Filter out zenith and wait states
     sel_valid_obs = survey_metrics['bin'] != ZENITH_BIN_NUM
     sel_valid_obs &= survey_metrics['bin'] != WAIT_SIGNAL
@@ -99,7 +100,7 @@ def save_survey_diagnostics(eval_metrics, save_dir, field_lookup, nside, action_
     field_ids = survey_metrics['field_id']
     bin_nums = survey_metrics['bin']
     timestamps = survey_metrics['timestamp']
-    
+
     # --- Plot bin and field radecs --- #
 
     # Get bin radecs
@@ -123,7 +124,7 @@ def save_survey_diagnostics(eval_metrics, save_dir, field_lookup, nside, action_
     axs[0].set_xlabel('ra ')
     axs[0].set_ylabel('dec')
     axs[0].set_title('Bins')
-    
+
     axs[1].scatter(field_radecs[:, 0], field_radecs[:, 1], label='agent', cmap='Purples', c=np.arange(len(field_radecs)), s=10)
     axs[1].set_xlabel('ra ')
     axs[1].set_title('Fields')
@@ -158,7 +159,7 @@ def save_nightly_diagnostics(eval_metrics, observing_night_strs, schedule_outdir
         # Mask zenith observations in plotting
         real_obs_mask = np.array(metrics['field_id']) != ZENITH_FIELD_ID
         real_obs_mask &= np.array(metrics['field_id']) != WAIT_SIGNAL
-        
+
         timestamps = metrics['timestamp']
         field_ids = metrics['field_id']
         bin_nums = metrics['bin']
@@ -166,8 +167,8 @@ def save_nightly_diagnostics(eval_metrics, observing_night_strs, schedule_outdir
         night_ts = night_dt.timestamp()
         sunset_time = math.ceil(calc_twilight(night_ts, 'set', env.unwrapped.horizon))
         timestamps = (timestamps - sunset_time) / 3600
-    
-        # Plot bins vs timestamp        
+
+        # Plot bins vs timestamp
         fig_b, axb = plt.subplots()
         axb.plot(timestamps[real_obs_mask],
                 bin_nums[real_obs_mask],
@@ -204,9 +205,9 @@ def save_nightly_diagnostics(eval_metrics, observing_night_strs, schedule_outdir
             _bins_vis_tonight = np.array(bin_nums).astype(int)
             _bincounts = np.bincount(_bins_vis_tonight[real_obs_mask], minlength=num_actions)
             _most_common_bin = np.argmax(_bincounts)
-            normed_feature_names = env.unwrapped.bin_feature_names
+            normed_feature_names = env.unwrapped.candidate_feature_names
             fig, axs = plt.subplots(len(normed_feature_names), figsize=(10, len(normed_feature_names)* 5))
-            for i, feat_row in enumerate(np.array(metrics['bin_observations']).T[:, _most_common_bin, :]):
+            for i, feat_row in enumerate(np.array(metrics['candidate_observations']).T[:, _most_common_bin, :]):
                 feat_name = normed_feature_names[i]
                 # unnormalize observations to compare to expert values
                 if feat_name == 'airmass':
@@ -225,9 +226,9 @@ def save_nightly_diagnostics(eval_metrics, observing_night_strs, schedule_outdir
         logger.info(f'Creating schedule gif for {night_idx}th night')
         save_nightly_schedule(night_metrics=metrics, save_dir=night_dir)
         if do_gifs:
-            save_gifs(night_dir / "schedule.csv", night_dir, do_fieldbin=True, do_bin=False, do_mollefield=False, do_ortho=False, action_space=action_space, nside=nside, 
+            save_gifs(night_dir / "schedule.csv", night_dir, do_fieldbin=True, do_bin=False, do_mollefield=False, do_ortho=False, action_space=action_space, nside=nside,
                       fid2radec_filepath=lookup_dirpath / 'fid2radec.json')
-            
+
         night_dt += timedelta(days=1)
 
 def save_nightly_schedule(night_metrics, save_dir):
@@ -238,7 +239,7 @@ def save_nightly_schedule(night_metrics, save_dir):
         return
 
     real_obs_mask = (bins != ZENITH_BIN_NUM) & (bins != WAIT_SIGNAL)
-    
+
     schedule_full = {
         'agent_timestamp': timestamps[real_obs_mask],
         'agent_field_id': fids[real_obs_mask],

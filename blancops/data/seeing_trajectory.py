@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from blancops.configs.constants import IDX2FILTER, FWHM_REF_FILTER
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.data.features.glob_features import get_night_boundaries
 
 import logging
@@ -24,32 +24,35 @@ logger = logging.getLogger(__name__)
 
 
 def _load_val_df(cache_path: Path) -> pd.DataFrame:
-    """Load the val-night DataFrame from a ``val_dataset_cache.pt``.
+    """Load the split-night DataFrame from a ``<split>_dataset_cache.pt``.
 
-    Duck-types both storage forms: a plain dict (``data['val_df']``) and a
-    ``ValDatasetCache`` instance (``data.val_df``).
+    Accepts both storage forms (plain dict and ``TransitionDatasetCache`` instance) and
+    both key generations: ``split_df`` as written now, and ``val_df`` as
+    written before the split rename.
 
     Args:
-        cache_path: Path to the torch-saved validation dataset cache.
+        cache_path: Path to the torch-saved split dataset cache.
 
     Returns:
-        The validation-night DataFrame (all enriched columns, val nights only).
+        The split-night DataFrame (all enriched columns, split nights only).
     """
     data = torch.load(cache_path, weights_only=False)
     if isinstance(data, dict):
-        val_df = data["val_df"]
+        val_df = data.get("split_df", data.get("val_df"))
     else:
-        val_df = getattr(data, "val_df", None)
+        val_df = getattr(data, "split_df", None)
+        if val_df is None:
+            val_df = getattr(data, "val_df", None)
     if val_df is None:
         raise KeyError(
-            f"Could not find 'val_df' in {cache_path}. Got a "
-            f"{type(data).__name__} without a 'val_df' entry/attribute."
+            f"Could not find 'split_df' or 'val_df' in {cache_path}. Got a "
+            f"{type(data).__name__} without either entry/attribute."
         )
     return val_df
 
 
 def extract_night_seeing_trajectory(
-    cache_path, val_night: str, sun_el_limit: float
+    cache_path, val_night: str, sun_el_limit: float, survey: SurveyProfile = DES
 ) -> pd.DataFrame:
     """Extract one validation night's measured seeing as a replayable trajectory.
 
@@ -63,6 +66,8 @@ def extract_night_seeing_trajectory(
         val_night: Night key (the value in the ``night`` column) to extract.
         sun_el_limit: Sun-elevation limit (deg) defining the night, used to
             compute the night's sunset for the time offset.
+        survey: Survey whose filter indices the cache uses; unknown indices
+            fall back to its seeing reference band.
 
     Returns:
         DataFrame with columns ``sec_since_sunset`` (s), ``fwhm`` (arcsec),
@@ -104,7 +109,8 @@ def extract_night_seeing_trajectory(
 
     fwhm_vals = fwhm_vals[valid]
     timestamps = ts_vals[valid]
-    bands = [IDX2FILTER.get(int(f), FWHM_REF_FILTER) for f in filt_vals[valid]]
+    idx2filter, ref_band = survey.idx2filter, survey.seeing_ref_filter
+    bands = [idx2filter.get(int(f), ref_band) for f in filt_vals[valid]]
     el = el_vals[valid]
 
     sunset_ts, _ = get_night_boundaries(val_night, sun_el_limit=sun_el_limit)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
 
 from blancops.telescope.constraints import ConstraintSet
 from blancops.telescope.parameters import TelescopeParameters
@@ -21,8 +25,8 @@ class TelescopeProfile:
     -----
     from blancops.telescope import get_telescope
 
-    t_profile = get_telescope("rubin")
-    t_slew  = t_profile.parameters.slew_time(daz=15.0, dalt=5.0)
+    t_profile = get_telescope("blanco")
+    t_slew  = t_profile.parameters.slew.slew_time(distance=15.0)
     ok      = t_profile.constraints.is_observable(az, alt, X, moon_sep, wind, sun_alt)
     loc     = t_profile.site.earth_location()
     """
@@ -39,6 +43,8 @@ class TelescopeProfile:
     site: ObservingSite
     parameters: TelescopeParameters
     constraints: ConstraintSet
+
+    observing_script_writer: Callable[..., Path] | None = None
 
     # ------------------------------------------------------------------ #
     # Convenience constructors                                             #
@@ -78,6 +84,43 @@ class TelescopeProfile:
             key=f"{self.key}_{key_suffix}",
             parameters=replace(self.parameters, **overrides),
         )
+
+    # ------------------------------------------------------------------ #
+    # Pointing visibility                                                  #
+    # ------------------------------------------------------------------ #
+
+    def visible(self, el: np.ndarray, ha: np.ndarray | None, dec: np.ndarray | None,
+                airmass_limit: float) -> np.ndarray:
+        """Pointings observable by airmass and, for equatorial mounts, the HA/Dec envelope.
+
+        Airmass is the plane-parallel X = 1 / cos(zenith distance); pointings below the horizon are never
+        visible. The envelope is skipped when the mount has none or when ``ha`` is None.
+
+        Parameters
+        ----------
+        el : np.ndarray
+            Elevation in radians.
+        ha : np.ndarray or None
+            Hour angle in radians.
+        dec : np.ndarray or None
+            Declination in radians.
+        airmass_limit : float
+            Effective airmass limit.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean visibility mask.
+        """
+        el = np.asarray(el, dtype=float)
+        airmass = np.full(el.shape, 10.0)
+        above = el > 0
+        airmass[above] = 1 / np.cos(90 * (np.pi / 180.0) - el[above])
+        visible = airmass < airmass_limit
+        limit = self.constraints.equatorial_limit
+        if limit is not None and ha is not None:
+            visible &= np.asarray(limit.satisfies(ha, np.degrees(np.asarray(dec, dtype=float))), dtype=bool)
+        return visible
 
     # ------------------------------------------------------------------ #
     # Repr                                                                 #

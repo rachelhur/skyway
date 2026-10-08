@@ -20,23 +20,21 @@ from einops import rearrange
 import numpy as np
 import gymnasium as gym
 from collections import defaultdict
-from astropy.time import Time
-import astropy.units as au
 from blancops import math
-from blancops.configs.constants import _NUM_FILTERS
-from blancops.configs.rl_schema import ActionConstraints, ExperimentConfig
+from blancops.configs.enums import RewardTerm
+from blancops.configs.experiment_schema import ActionConstraints, ExperimentConfig, RLAlgConfig
+from blancops.data.rewards import combine_rewards, normalize_rewards, uniformity_inputs
+from blancops.data_quality.teff import predict_teff
+from blancops.survey.profiles import DES, SurveyProfile
 from blancops.data.features.bin_features import (
     # Shared per-timestep helpers — single source of truth for bin features.
     _STALENESS_BASE_KEYS,
     _SURVEY_PROGRESS_BASE_KEYS,
-    compute_bin_ephemeris_features,
     compute_bin_progress_features,
     apply_relative_bin_features,
     validate_history_bin_features,
-    # Small math helpers still imported by other callers.
-    get_delta_az_el,
-    get_relative_feature,
 )
+from blancops.data.features.candidate_features import compute_candidate_ephemeris_features
 from blancops.data.features.glob_features import (
     # Shared per-timestep helpers — single source of truth for global features.
     compute_global_time_only_features,
@@ -45,13 +43,17 @@ from blancops.data.features.glob_features import (
     compute_global_tracker_features,
 )
 from blancops.data.features.normalizations import StateNormalizer, apply_cyclical_features, build_normalizer_kwargs, normalize_timestamp, setup_feature_names
+from blancops.data.norm_stats import NormStats
+from blancops.data.features.field_features import (
+    FieldGrid, build_field_normalizer, compute_field_features, expand_field_feature_names, stack_field_features,
+)
 from blancops.environment.survey_tracker import SurveyProgressTracker
 from blancops.environment.seeing_model import SeeingModel
 from blancops.math import units
-from blancops.ephemerides import ephemerides
+from blancops.ephemerides import astropy_ephem, ephemerides
 from blancops.telescope.base import TelescopeProfile
-from blancops.telescope.registry import get_telescope
 from blancops.configs.constants import *
+from blancops.configs.enums import grid_is_azel, has_filter, is_field_level
 
 logger = logging.getLogger(__name__)
 
@@ -86,39 +88,50 @@ class StateSnapshot:
 #
 # Features not listed here are assumed to be unconditionally computable.
 
-_FILTER_NAMES = list(FILTER2IDX.keys())
-
 # _STALENESS_BIN_REQUIREMENTS = [("attr", "lookups.total_ot_sec")]
 
-_FEATURE_REQUIREMENTS: dict[str, list[tuple[str, str]]] = {
-    "fwhm": [("attr", "_seeing_model")],
-    "t_survey": [("hook", "_get_t_survey")],
-    # Works in both 1D and 2D tracker modes — only attr check.
-    "global_mean_tiling": [("attr", "_survey_progress_tracker")],
-    **{
-        f"survey_progress_{f}": [
-            ("attr", "_survey_progress_tracker"),
-            ("flag", "do_filt"),
-        ]
-        for f in _FILTER_NAMES
-    },
-    **{
-        f"urgency_{f}": [
-            ("attr", "_survey_progress_tracker"),
-            ("flag", "do_filt"),
-            ("hook", "_get_survey_night_idx"),
-            ("hook", "_get_survey_nights_total"),
-        ]
-        for f in _FILTER_NAMES
-    },
-    **{
-        f"global_mean_tiling_{f}": [
-            ("attr", "_survey_progress_tracker"),
-            ("flag", "do_filt"),
-        ]
-        for f in _FILTER_NAMES
-    },
-}
+def _feature_requirements(filters) -> dict[str, list[tuple[str, str]]]:
+    """Requirements of each conditionally computable global feature, with per-filter names for ``filters``.
+
+    Parameters
+    ----------
+    filters : sequence of str
+        Survey filters that suffix the per-filter feature names.
+
+    Returns
+    -------
+    dict
+        Feature name -> list of (kind, target) requirements.
+    """
+    return {
+        "fwhm": [("attr", "_seeing_model")],
+        "t_survey": [("hook", "_get_t_survey")],
+        # Works in both 1D and 2D tracker modes - only attr check.
+        "global_mean_tiling": [("attr", "_survey_progress_tracker")],
+        **{
+            f"survey_progress_{f}": [
+                ("attr", "_survey_progress_tracker"),
+                ("flag", "do_filt"),
+            ]
+            for f in filters
+        },
+        **{
+            f"urgency_{f}": [
+                ("attr", "_survey_progress_tracker"),
+                ("flag", "do_filt"),
+                ("hook", "_get_survey_night_idx"),
+                ("hook", "_get_survey_nights_total"),
+            ]
+            for f in filters
+        },
+        **{
+            f"global_mean_tiling_{f}": [
+                ("attr", "_survey_progress_tracker"),
+                ("flag", "do_filt"),
+            ]
+            for f in filters
+        },
+    }
 
 
 class BaseBlancoEnv(gym.Env, ABC):
@@ -133,16 +146,15 @@ class BaseBlancoEnv(gym.Env, ABC):
         cfg: ExperimentConfig,
         constraints_cfg: ActionConstraints,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats: NormStats,
         telescope: TelescopeProfile | None = None,
+        survey: SurveyProfile = DES,
     ):
         super().__init__()
         # Configuration, Normalizations, and Lookups
         self.cfg = cfg
         self.lookups = lookups
-        self._z_score_stats = z_score_stats
-        self._rel_norm_stats = rel_norm_stats
+        self._norm_stats = norm_stats
         self.airmass_limit = constraints_cfg.airmass_limit
         self.airmass_failsafe = constraints_cfg.airmass_failsafe
         self.sun_el_limit = constraints_cfg.sun_el_limit
@@ -152,41 +164,51 @@ class BaseBlancoEnv(gym.Env, ABC):
         # action mask; it is None for alt-az profiles, in which case the check
         # is skipped. ActionConstraints still owns the runtime-mutable airmass /
         # sun limits (see set_constraints).
-        self._telescope = telescope if telescope is not None else get_telescope("blanco")
-        self._equatorial_limit = self._telescope.constraints.equatorial_limit
+        self._telescope = telescope if telescope is not None else survey.telescope
+        self._survey = survey
+        survey.check_telescope(self._telescope)
+        survey.check_lookups(lookups)
+
+        # Reward: same terms as the offline dataset, scaled with the training reward stats.
+        # _step_record is set by _advance_after_action (None on WAIT).
+        self._reward_cfg = cfg.model.reward if isinstance(cfg.model, RLAlgConfig) else None
+        self._band_threshold = survey.acceptance_thresholds(cfg.data.acceptance)  # [n_filters] minimum accepted teff
+        self._step_record: dict | None = None
 
         # Feature Configs
-        norm_kwargs = build_normalizer_kwargs(cfg.data.norm)
+        norm_kwargs = build_normalizer_kwargs(cfg.data.norm, survey=survey)
         self.base_global_feature_names = list(cfg.data.global_features)
         self.base_bin_feature_names = list(cfg.data.bin_features)
-        self.global_feature_names, self.bin_feature_names = setup_feature_names(
+        self.global_feature_names, self.candidate_feature_names = setup_feature_names(
             self.base_global_feature_names,
             self.base_bin_feature_names,
             norm_kwargs['cyclical_feature_names'],
             norm_kwargs['do_cyclical_norm'],
-            do_filt='filter' in cfg.data.action_space
+            do_filt=has_filter(cfg.data.action_space),
+            survey=survey,
         )
-        self.include_bin_features = cfg.data.bin_state_dim > 0
-        self.do_filt = 'filter' in cfg.data.action_space
+        self.include_candidate_features = cfg.data.candidate_state_dim > 0
+        self.do_filt = has_filter(cfg.data.action_space)
 
         # Normalizers
-        self.global_normalizer = StateNormalizer(state_feature_names=self.global_feature_names, **norm_kwargs)
-        self.bin_normalizer = StateNormalizer(state_feature_names=self.bin_feature_names, **norm_kwargs)
-        self.do_cyclical_norm = self.global_normalizer.do_cyclical_norm or self.bin_normalizer.do_cyclical_norm
+        self.global_normalizer = StateNormalizer(state_feature_names=self.global_feature_names, survey=survey, **norm_kwargs)
+        self.candidate_normalizer = StateNormalizer(state_feature_names=self.candidate_feature_names, survey=survey,
+                                                    **norm_kwargs)
+        self.do_cyclical_norm = self.global_normalizer.do_cyclical_norm or self.candidate_normalizer.do_cyclical_norm
 
         self._has_historical_features = any(
             feat_substr in bf
             for feat_substr in (_SURVEY_PROGRESS_BASE_KEYS + _STALENESS_BASE_KEYS)
-            for bf in self.bin_feature_names
+            for bf in self.candidate_feature_names
         )
 
-        self.idx2filter = IDX2FILTER
-        self.nfilters = _NUM_FILTERS
+        self.idx2filter = survey.idx2filter
+        self.nfilters = survey.num_filters
 
         # Heapix Grid
         self.hpGrid = ephemerides.HealpixGrid(
             nside=cfg.data.nside,
-            is_azel=('azel' in cfg.data.action_space)
+            is_azel=grid_is_azel(cfg.data.action_space)
         )
         self.nbins = len(self.hpGrid.idx_lookup)
 
@@ -196,8 +218,19 @@ class BaseBlancoEnv(gym.Env, ABC):
         # LookupTables.__post_init__.
         self._set_field_arrays(lookups)
 
+        # field_filter: candidates are survey fields
+        self.field_level = is_field_level(cfg.data.action_space)
+        self._field_feature_cache: tuple | None = None
+        # Replay mode (expert replay checks): accept commands outside the current mask
+        self._replay_mode = False
+        if self.field_level:
+            self.candidate_feature_names = expand_field_feature_names(list(cfg.data.field_features), survey=survey)
+            self.candidate_normalizer = build_field_normalizer(self.candidate_feature_names)
+            self._field_grid = FieldGrid(self._ra_arr, self._dec_arr)
+
         # Mutable runtime state — populated by reset() via _begin_episode
         self._ts: float | None = None
+        self._zenith_ts: float | None = None
         self._field_id: int = ZENITH_FIELD_ID
         self._bin_num: int = ZENITH_BIN_NUM
         self._filter_idx: int = ZENITH_FILTER_IDX
@@ -207,10 +240,11 @@ class BaseBlancoEnv(gym.Env, ABC):
         self._sunrise_ts: float | None = None
         self._night_end_ts: float | None = None
         self._global_state: np.ndarray | None = None
-        self._bin_state: np.ndarray | None = None
+        self._candidate_state: np.ndarray | None = None
         self._action_mask: np.ndarray | None = None
         self._is_new_night: bool = False
         self._valid_fields_per_bin: dict | None = None
+        self._visible_bin_mask: np.ndarray | None = None
 
         # Coordinate-system-specific caches (RA/Dec mode only). Populated
         # lazily by _compute_bin_assignments on first use.
@@ -220,7 +254,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         self._active_bins_s: np.ndarray | None = None
 
         self._last_glob_nan_mas: np.ndarray | None = None
-        self._last_bin_nan_mask: np.ndarray | None = None
+        self._last_candidate_nan_mask: np.ndarray | None = None
 
         # Seeing strategy. Subclasses assign a concrete SeeingModel
         # (constant for the forward sim, predictive for live/historic). None
@@ -244,7 +278,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         )
 
         # Fail-fast
-        self._setup_action_and_obs_spaces(cfg.data.state_dim, cfg.data.bin_state_dim)
+        self._setup_action_and_obs_spaces(cfg.data.state_dim, cfg.data.candidate_state_dim)
 
         # Validation is NOT called here; concrete subclasses call
         # self._validate_feature_config() at the end of their __init__.
@@ -259,6 +293,11 @@ class BaseBlancoEnv(gym.Env, ABC):
         self._ra_arr = lookups.fields["ra"].to_numpy()               # [n_fields]
         self._dec_arr = lookups.fields["dec"].to_numpy()             # [n_fields]
         self.nfields = len(self._fids)
+        # Exact (RA, Dec) -> field_id, keyed on the same float64 values the observation publishes
+        self._coord_to_field = {(float(r), float(d)): int(f) for r, d, f in zip(self._ra_arr, self._dec_arr, self._fids)}
+        if getattr(self, 'field_level', False):
+            self._field_grid = FieldGrid(self._ra_arr, self._dec_arr)
+            self._field_feature_cache = None
 
     # -----------------------------------------------------------------------
     # Gym contract — template methods. The shape of step/reset is fixed
@@ -286,14 +325,16 @@ class BaseBlancoEnv(gym.Env, ABC):
 
         self._update_action_masks()
         self._global_state = self._calculate_global_features()
-        if self.include_bin_features:
-            self._bin_state = self._calculate_bin_features()
+        if self.include_candidate_features:
+            self._candidate_state = self._calculate_candidate_features()
 
         return self.get_obs(), self.get_info()
 
     def step(self, action: dict):
-        assert self.action_space.contains(action), f"Invalid action {action}"
-        last_field_id = np.int32(self._field_id)
+        if self.field_level:
+            action = self._command_to_action(action)
+        else:
+            assert self.action_space.contains(action), f"Invalid action {action}"
 
         # Subclass-defined: advance time, update visit counters, possibly roll
         # into a new night (offline) or fast-forward on WAIT (online).
@@ -301,10 +342,10 @@ class BaseBlancoEnv(gym.Env, ABC):
 
         self._update_action_masks()
         self._global_state = self._calculate_global_features()
-        if self.include_bin_features:
-            self._bin_state = self._calculate_bin_features()
+        if self.include_candidate_features:
+            self._candidate_state = self._calculate_candidate_features()
 
-        reward = self._get_rewards(last_field_id, self._field_id)
+        reward = self._get_rewards()
         terminated = self._episode_terminated()
         truncated = False
 
@@ -389,6 +430,8 @@ class BaseBlancoEnv(gym.Env, ABC):
         clobbering the running visit history.
         """
         self._ts = snap.timestamp
+        if snap.field_id == ZENITH_FIELD_ID:
+            self._zenith_ts = snap.timestamp
         self._field_id = snap.field_id
         self._bin_num = snap.bin_num
         self._filter_idx = snap.filter_idx
@@ -411,8 +454,7 @@ class BaseBlancoEnv(gym.Env, ABC):
     def _record_visit(self, field_id: int, filter_idx: int = None) -> None:
         """Bookkeeping after a successful observation.
 
-        Single source of truth for visit accumulation: keeps
-        `_s_visits_cur`, `_s_filter_visits_cur`, and the survey-progress
+        Keeps `_s_visits_cur`, `_s_filter_visits_cur`, and the survey-progress
         tracker in sync. Called by `_advance_after_action` in each
         concrete subclass for every non-wait action.
         """
@@ -420,7 +462,9 @@ class BaseBlancoEnv(gym.Env, ABC):
             field_id=field_id,
             filter_idx=filter_idx if self.do_filt else None,
         )
-        ot_now = float(self._ot_at_sunset + (self._ts - self._sunset_ts))
+        # Field runs time a visit at exposure start, as the offline features do.
+        visit_ts = self._step_record['t_start'] if self.field_level else self._ts
+        ot_now = float(self._ot_at_sunset + (visit_ts - self._sunset_ts))
         if self.do_filt:
             self._last_visit_ot[field_id, filter_idx] = ot_now
         else:
@@ -474,25 +518,22 @@ class BaseBlancoEnv(gym.Env, ABC):
         """Normalizes and returns the current state"""
         global_state = np.array(self._global_state, dtype=np.float32)
         global_state_normed, glob_nan_mask = self.global_normalizer.transform(
-            global_state,
-            self._z_score_stats['global_features'],
-            self._rel_norm_stats['global_features']
+            global_state, **self._norm_stats.normalizer_kwargs('global_features')
         )
-        if self.include_bin_features:
-            bin_state_arr = np.array(self._bin_state, dtype=np.float32)
-            bin_state_normed, bin_nan_mask = self.bin_normalizer.transform(
-                bin_state_arr,
-                self._z_score_stats['bin_features'],
-                self._rel_norm_stats['bin_features']
+        if self.include_candidate_features:
+            candidate_state_arr = np.array(self._candidate_state, dtype=np.float32)
+            group = 'field_features' if self.field_level else 'bin_features'
+            candidate_state_normed, candidate_nan_mask = self.candidate_normalizer.transform(
+                candidate_state_arr, **self._norm_stats.normalizer_kwargs(group)
             )
         else:
-            bin_state_normed = np.array([], dtype=np.float32)
-            bin_nan_mask = None
+            candidate_state_normed = np.array([], dtype=np.float32)
+            candidate_nan_mask = None
 
         self._last_glob_nan_mask = glob_nan_mask
-        self._last_bin_nan_mask = bin_nan_mask
+        self._last_candidate_nan_mask = candidate_nan_mask
 
-        return {"global_state": global_state_normed, "bin_state": bin_state_normed}
+        return {"global_state": global_state_normed, "candidate_state": candidate_state_normed}
 
     def get_info(self) -> dict:
         """
@@ -508,80 +549,62 @@ class BaseBlancoEnv(gym.Env, ABC):
             # 'n_visited': self._n_visits_cur.copy(),
             'survey_progress_tracker': self._survey_progress_tracker.copy(),
             'valid_fields_per_bin': dict(self._valid_fields_per_bin) if self._valid_fields_per_bin is not None else {},
+            'visible_bin_mask': self._visible_bin_mask.copy() if self._visible_bin_mask is not None else None,
             'timestamp': self._ts,
             'is_new_night': bool(self._is_new_night),
             'night_idx': int(self._night_idx),
             'bin': int(self._bin_num),
             'field_id': int(self._field_id),
             'glob_nan_mask': self._last_glob_nan_mask,
-            'bin_nan_mask':  self._last_bin_nan_mask,
+            'candidate_nan_mask': self._last_candidate_nan_mask,
         }
         return info_dict
 
-    def _get_airmass(self, elevation_rad):
-        """
-        Calculates airmass using the simple plane-parallel approximation:
-        $$X = \frac{1}{\cos(z)} = \frac{1}{\sin(el)}$$
-        """
-        # Ensure elevation is valid for airmass calculation
-        el = np.clip(elevation_rad, 1e-5, np.pi/2)
-        return 1.0 / np.sin(el)
 
-    def _local_sidereal_time(self, timestamp: float) -> float:
-        """Apparent local sidereal time at the telescope site, in radians.
 
-        Mirrors the LST computation in
-        ``glob_features.compute_global_time_only_features`` but reads the
-        longitude from the wired telescope profile.
 
-        Args
-        ----
-        timestamp : Unix timestamp (UTC).
+    def _slew_distance(self, last_fid: int, current_fid: int) -> float:
+        """On-sky distance between two fields; the zenith start uses the zenith at self._ts.
+
+        Parameters
+        ----------
+        last_fid : int
+            Previous field id, or ZENITH_FIELD_ID at the start of a night.
+        current_fid : int
+            Next field id.
 
         Returns
         -------
-        Local apparent sidereal time in radians.
+        float
+            Angular separation in radians.
         """
-        astro_time = Time(timestamp, format="unix", scale="utc")
-        return float(
-            astro_time.sidereal_time(
-                "apparent", longitude=self._telescope.site.lon * au.deg
-            ).radian
-        )
-
-    def _equatorial_envelope_mask(self) -> np.ndarray:
-        """Per-field boolean mask of fields inside the mount's HA/Dec envelope.
-
-        Computes hour angle vectorized as ``wrap_to_pi(LST - RA)`` to avoid a
-        per-field ``ephem`` loop, then tests each (HA, Dec) against
-        ``equatorial_limit``. Returns an all-True mask when the profile has no
-        equatorial limit (alt-az mounts).
-
-        Returns
-        -------
-        Boolean array of shape ``(nfields,)``; True where the field is reachable.
-        """
-        if self._equatorial_limit is None:
-            return np.ones(self.nfields, dtype=bool)
-        lst = self._local_sidereal_time(self._ts)
-        # Wrap to (-pi, pi] to match the ephem hour-angle convention.
-        ha = (lst - self._ra_arr + np.pi) % (2.0 * np.pi) - np.pi
-        return np.asarray(
-            self._equatorial_limit.satisfies(ha, np.degrees(self._dec_arr)),
-            dtype=bool,
-        )
-
-    def _get_slew_time(self, last_fid, current_fid, overhead=30.0):
-        """Calculates time to move telescope between fields."""
         if last_fid == ZENITH_FIELD_ID:
-            blanco = ephemerides.blanco_observer(time=float(self._ts))
+            # Field runs slew from the zenith where the telescope parked (night start), as the dataset does.
+            zenith_ts = self._zenith_ts if self.field_level and self._zenith_ts is not None else self._ts
+            blanco = ephemerides.blanco_observer(time=float(zenith_ts))
             last_pos = np.array(blanco.radec_of('0', '90'))
         else:
             last_pos = self._ra_arr[last_fid], self._dec_arr[last_fid]
 
         current_pos = self._ra_arr[current_fid], self._dec_arr[current_fid]
-        distance = math.geometry.angular_separation(last_pos, current_pos)
-        return math.geometry.blanco_slew_time(distance) + overhead
+        return math.geometry.angular_separation(last_pos, current_pos)
+
+    def _get_dead_time(self, distance: float, filter_change: bool) -> float:
+        """Time between exposures from the telescope profile: max(visit_overhead, slew_time(d)).
+
+        Parameters
+        ----------
+        distance : float
+            On-sky slew distance in radians.
+        filter_change : bool
+            Whether the filter changes between the two exposures.
+
+        Returns
+        -------
+        float
+            Dead time in seconds.
+        """
+        return float(self._telescope.parameters.dead_time(distance / units.deg, filter_change))
 
     def _get_exposure_time(self, field_id=None, filter_idx=None):
         """Per-(field, filter) exposure time from the lookups matrix.
@@ -600,24 +623,107 @@ class BaseBlancoEnv(gym.Env, ABC):
             self.lookups.fidfilt_exptime[int(field_id), int(filter_idx)]
         )
 
-    def _get_rewards(self, last_field, next_field):
-        '''
-        Calculates the reward for a single state transition.
+    def _uses_reward_term(self, term: RewardTerm) -> bool:
+        """Whether the configured reward includes a term."""
+        return self._reward_cfg is not None and term in self._reward_cfg.terms
 
-        Uses self._reward_func() if available, otherwise returns 1.
+    def _uses_teff_reward(self) -> bool:
+        """Whether a reward term reads the step's predicted teff."""
+        return self._uses_reward_term(RewardTerm.TEFF) or self._uses_reward_term(RewardTerm.TEFF_ACCEPTED)
 
-        Args
-        ----
-            last_field (int): Field ID before taking the action.
-            next_field (int): Field ID after taking the action.
+    def _needs_seeing_model(self) -> bool:
+        """Whether the fwhm feature or a teff-based reward term (via predicted teff) needs a seeing model."""
+        return "fwhm" in self.global_feature_names or self._uses_teff_reward()
+
+    def _cache_step_reward_inputs(self, s: dict) -> None:
+        """Store a step's exposure-time reward inputs on its record, before the step can roll into the next night.
+
+        Parameters
+        ----------
+        s : dict
+            Step record with field_id, filter_idx, and t_start; gains 'uniformity' and, when a
+            teff-based term is used, 'teff_pred'.
+        """
+        if self._uses_teff_reward():
+            self._teff_pred(s)
+        s['uniformity'] = self._uniformity_step_inputs(s)
+
+    def _teff_pred(self, s: dict) -> float:
+        """Predicted teff of a step."""
+        if 'teff_pred' not in s:
+            s['teff_pred'] = self._predict_teff(s)
+        return s['teff_pred']
+
+    def _min_teff(self, s: dict) -> float:
+        """Minimum accepted teff for a step's filter under the run's acceptance rule."""
+        return float(self._band_threshold[int(s['filter_idx'])])
+
+    def _uniformity_step_inputs(self, s: dict) -> dict | None:
+        """Uniformity reward inputs from survey counts before this exposure; None when the term is unused.
+
+        Parameters
+        ----------
+        s : dict
+            Step record with field_id, filter_idx, and t_start.
 
         Returns
         -------
-            float: The calculated reward value.
-        '''
-        if getattr(self, "_reward_func", None) is None:
-            return 1.0
-        return self._reward_func(last_field, next_field)
+        dict or None
+            Keyword arguments for uniformity_reward, or None.
+        """
+        if not self._uses_reward_term(RewardTerm.UNIFORMITY):
+            return None
+        tracker = self._survey_progress_tracker
+        return uniformity_inputs(tracker.raw_counts, tracker.target_counts, s['field_id'], s['filter_idx'])
+
+    def _get_rewards(self) -> float:
+        """Reward for the last step, from the dataset's reward terms and the training reward stats.
+
+        Returns
+        -------
+        float
+            Normalized reward; 0.0 without a reward config or when the step took no exposure (WAIT).
+        """
+        if self._reward_cfg is None or self._step_record is None:
+            return 0.0
+        R_tot = combine_rewards(self._reward_cfg, self._reward_term_inputs())
+        return float(normalize_rewards(self._reward_cfg, R_tot, self._norm_stats.reward)[0])
+
+    def _reward_term_inputs(self) -> dict:
+        """Per reward term, a callable returning its keyword arguments for the last step."""
+        s = self._step_record
+        params = self._telescope.parameters
+        return {
+            RewardTerm.EXPERT: lambda: dict(n_transitions=1),
+            RewardTerm.TEFF: lambda: dict(teff=np.array([self._teff_pred(s)])),
+            RewardTerm.TEFF_ACCEPTED: lambda: dict(
+                teff=np.array([self._teff_pred(s)]), min_teff=np.array([self._min_teff(s)]),
+                exptime=np.array([self._get_exposure_time(s['field_id'], s['filter_idx'])])),
+            RewardTerm.SLEW: lambda: dict(excess_times=np.array(
+                [s['dead_time'] - params.visit_overhead(s['filter_change'])])),
+            RewardTerm.UNIFORMITY: lambda: s['uniformity'],
+        }
+
+    def _predict_teff(self, s: dict) -> float:
+        """Model teff at exposure start, with the env's seeing model for the delivered FWHM.
+
+        Parameters
+        ----------
+        s : dict
+            Step record with field_id, filter_idx, and t_start (Unix seconds).
+
+        Returns
+        -------
+        float
+            Predicted effective exposure time factor tau.
+        """
+        if self._seeing_model is None:
+            raise ValueError("teff reward requires a seeing model in the environment.")
+        band = self.idx2filter[s['filter_idx']]
+        ra, dec = self._ra_arr[s['field_id']], self._dec_arr[s['field_id']]
+        _, el = ephemerides.equatorial_to_topographic(ra=ra, dec=dec, time=s['t_start'])
+        fwhm = self._seeing_model.fwhm(s['t_start'], band=band, el=el) * units.arcsec
+        return float(predict_teff(time=s['t_start'], ra=ra, dec=dec, band=band, el=el, fwhm=fwhm))
 
     def _calculate_global_features(self) -> list:
         """Compute the global feature vector for the current state.
@@ -647,10 +753,10 @@ class BaseBlancoEnv(gym.Env, ABC):
         hooks/tracker/flags are guaranteed available for every feature in
         ``self.global_feature_names``.
         """
-        timestamp = self._ts
+        timestamp = self._state_timestamp()
 
         # 1. Time-only ephemeris (gives us LST so we can resolve zenith pointing).
-        new_features = compute_global_time_only_features(timestamp=timestamp)
+        new_features = compute_global_time_only_features(timestamp=timestamp, telescope=self._telescope)
 
         # 2. Resolve pointing RA/Dec. Preserves the original env's zenith branch
         #    (`lst, blanco.lon`) — see the migration notes; this disagrees with
@@ -671,7 +777,8 @@ class BaseBlancoEnv(gym.Env, ABC):
 
         # 3. Pointing-derived ephemeris (az/el/ha/airmass + sky brightness).
         new_features.update(
-            compute_global_pointing_features(timestamp=timestamp, ra=ra, dec=dec, moon_radec=(new_features['moon_ra'], new_features['moon_dec']))
+            compute_global_pointing_features(timestamp=timestamp, ra=ra, dec=dec, moon_radec=(new_features['moon_ra'], new_features['moon_dec']),
+                                             survey=self._survey)
         )
 
         # 4. Filter features. The live env has three cases (zenith / WAIT or
@@ -681,17 +788,18 @@ class BaseBlancoEnv(gym.Env, ABC):
         if self._field_id == ZENITH_FIELD_ID:
             new_features['filter_wave'] = 0.
             new_features['filter_idx'] = ZENITH_FILTER_IDX
-            for filt in FILTER2WAVE.keys():
+            for filt in self._survey.filters:
                 new_features[f'is_filter_{filt}'] = 0
         else:
             if self._bin_num == WAIT_SIGNAL or (not self.do_filt):
                 new_features['filter_wave'] = 0
                 new_features['filter_idx'] = self._filter_idx
             else:
-                new_features['filter_wave'] = IDX2WAVE[self._filter_idx] / FILTERWAVENORM
+                wave_norm = self._telescope.parameters.filter_wave_norm
+                new_features['filter_wave'] = self._survey.idx2wave[self._filter_idx] / wave_norm
                 new_features['filter_idx'] = self._filter_idx
-            filt_str = IDX2FILTER[self._filter_idx]
-            for filt in FILTER2WAVE.keys():
+            filt_str = self.idx2filter[self._filter_idx]
+            for filt in self._survey.filters:
                 new_features[f'is_filter_{filt}'] = filt_str == filt
 
         # 5. Hook-derived features — only populated if their source is available.
@@ -712,6 +820,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         ctx = {
             "tracker": tracker,
             "idx2filter": self.idx2filter,
+            "survey": self._survey,
             # Eagerly resolve the hooks the urgency family needs. Cheap, and
             # keeps `compute_global_tracker_features` free of env coupling.
             # These will be None for envs that don't override the hooks, but
@@ -738,7 +847,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         # if tracker._is_field_filter:
         #     survey_night_idx = self._get_survey_night_idx()
         #     survey_nights_total = self._get_survey_nights_total()
-        #     for filt, idx in FILTER2IDX.items():
+        #     for filt, idx in self._survey.filter2idx.items():
         #         p_name = f"survey_progress_{filt}"
         #         u_name = f"urgency_{filt}"
         #         if p_name in self.global_feature_names:
@@ -792,18 +901,103 @@ class BaseBlancoEnv(gym.Env, ABC):
         return global_state_features
 
     # -----------------------------------------------------------------------
-    # Bin features — drives the shared helpers in bin_features.py.
+    # Candidate features — field features (field_features.py) or bin
+    # features (bin_features.py), depending on the action space.
     # -----------------------------------------------------------------------
 
-    def _calculate_bin_features(self):
-        """Compute the bin feature tensor for the current state.
+    def _state_timestamp(self) -> float:
+        """Time the state describes: the start of the latest exposure on the field path (as the dataset rows
+        are timestamped, and as DES queues the next exposure during the current one), else the clock.
+
+        Returns
+        -------
+        float
+            Unix timestamp.
+        """
+        if self.field_level and self._step_record is not None and not self._is_new_night:
+            return float(self._step_record['t_start'])
+        return self._ts
+
+    def _current_pointing_radec(self) -> np.ndarray:
+        """Current pointing (RA, Dec) in radians; the zenith for WAIT and sentinel pointings.
+
+        Returns
+        -------
+        np.ndarray
+            (2,) RA and Dec.
+        """
+        if self._bin_num == WAIT_SIGNAL or self._field_id == ZENITH_FIELD_ID:
+            blanco = ephemerides.blanco_observer(time=self._ts)
+            return np.array(blanco.radec_of('0', '90'))
+        return np.array([self._ra_arr[self._field_id], self._dec_arr[self._field_id]])
+
+    def _field_features_now(self) -> dict:
+        """Raw field features at the current state, computed once per state and reused by the mask.
+
+        Returns
+        -------
+        dict
+            Output of `compute_field_features` for every field.
+        """
+        tracker = self._survey_progress_tracker
+        ts = self._state_timestamp()
+        key = (ts, self._field_id, int(tracker.raw_counts.sum()))
+        if self._field_feature_cache is None or self._field_feature_cache[0] != key:
+            feats = compute_field_features(
+                timestamp=ts, pointing_radec=self._current_pointing_radec(), field_grid=self._field_grid,
+                night_duration_sec=self._sunrise_ts - self._sunset_ts, counts=tracker.raw_counts,
+                targets=tracker.target_counts, last_visit_ot=self._last_visit_ot,
+                ot_now=float(self._ot_at_sunset + (ts - self._sunset_ts)), survey=self._survey,
+            )
+            self._field_feature_cache = (key, feats)
+        return self._field_feature_cache[1]
+
+    def _update_field_action_mask(self) -> np.ndarray:
+        """Field-level mask: visible (airmass, mount envelope, from the field features) and in plan and incomplete.
+
+        Returns
+        -------
+        np.ndarray
+            Flat boolean mask over n_fields * n_filters actions; all False while the Sun is up.
+        """
+        self._valid_fields_per_bin = defaultdict(list)
+        self._visible_bin_mask = None
+        ts = self._state_timestamp()
+        sun_radec = ephemerides.get_source_ra_dec('sun', time=ts)
+        _, sun_el = ephemerides.equatorial_to_topographic(sun_radec[0], sun_radec[1], time=ts)
+        if sun_el / units.deg > self.sun_el_limit:
+            self._action_mask = np.zeros(self.nfields * self.nfilters, dtype=bool)
+            return self._action_mask
+        feats = self._field_features_now()
+        visible = self._telescope.visible(
+            feats['el'], feats['ha'], self._dec_arr, min(self.airmass_limit, self.airmass_failsafe)
+        )
+        sel_valid = self._survey_progress_tracker.get_incomplete_mask() & visible[:, np.newaxis]
+        self._action_mask = self._apply_field_mask(sel_valid).flatten()
+        return self._action_mask
+
+    def _calculate_candidate_features(self) -> np.ndarray:
+        """Compute the candidate feature tensor for the current state.
+
+        Returns
+        -------
+        np.ndarray
+            (n_candidates, n_feats) in the order of `self.candidate_feature_names`; candidates are survey
+            fields for field_filter, else HEALPix bins.
+        """
+        if self.field_level:
+            return stack_field_features(self._field_features_now(), self.candidate_feature_names)
+        return self._calculate_bin_features()
+
+    def _calculate_bin_features(self) -> np.ndarray:
+        """Compute the HEALPix bin feature tensor for the current state.
 
         Thin orchestration over the shared helpers in
         `blancops.data.features.bin_features`:
 
           1. Resolve the current pointing in RA/Dec (handling the WAIT/zenith
              fallback).
-          2. Compute ephemeris features via `compute_bin_ephemeris_features`.
+          2. Compute ephemeris features via `compute_candidate_ephemeris_features`.
           3. If any history features are configured, compute the field->bin
              assignment + visibility mask, then call
              `compute_bin_history_features` (NaN sentinels for inactive bins).
@@ -811,25 +1005,19 @@ class BaseBlancoEnv(gym.Env, ABC):
           5. Validate history features (NaN-aware).
           6. Convert internal NaN sentinels to the external value (-1.0).
           7. Stack into `(nbins, nfeats)` in the order of
-             `self.bin_feature_names`.
+             `self.candidate_feature_names`.
         """
         timestamp = self._ts
         tracker = self._survey_progress_tracker
 
         # 1. Pointing in RA/Dec, with zenith fallback for WAIT / sentinel pointings.
-        if self._bin_num == WAIT_SIGNAL or self._field_id == ZENITH_FIELD_ID:
-            blanco = ephemerides.blanco_observer(time=timestamp)
-            pointing_radec = np.array(blanco.radec_of('0', '90'))
-        else:
-            pointing_radec = np.array(
-                [self._ra_arr[self._field_id], self._dec_arr[self._field_id]]
-            )
+        pointing_radec = self._current_pointing_radec()
 
         # 2. Ephemeris features (always produced for every key).
-        features = compute_bin_ephemeris_features(
+        features = compute_candidate_ephemeris_features(
             timestamp=timestamp,
             pointing_radec=pointing_radec,
-            hpGrid=self.hpGrid,
+            grid=self.hpGrid,
             night_duration_in_sec=self._sunrise_ts - self._sunset_ts
         )
 
@@ -856,7 +1044,7 @@ class BaseBlancoEnv(gym.Env, ABC):
                     t_since_last_visit_divisor=None, #self.lookups.total_ot_sec
                 )
             )
-        # for key in self.bin_feature_names:
+        # for key in self.candidate_feature_names:
         #     print(key)
         # for key in features.keys():
         #     print(key)
@@ -864,13 +1052,13 @@ class BaseBlancoEnv(gym.Env, ABC):
         # 4. Relative + cyclical features (in place on the dict).
         el_mask = features['el'] > 0
         apply_relative_bin_features(
-            features, el_mask, self._has_historical_features, self.do_filt
+            features, el_mask, self._has_historical_features, self.do_filt, self._survey
         )
-        if self.bin_normalizer.do_cyclical_norm:
+        if self.candidate_normalizer.do_cyclical_norm:
             apply_cyclical_features(
                 features,
                 self.base_bin_feature_names,
-                self.bin_normalizer.cyclical_feature_names,
+                self.candidate_normalizer.cyclical_feature_names,
             )
         # 5. Validate (NaN-aware). Only meaningful when history features exist.
         if self._has_historical_features:
@@ -886,7 +1074,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         #    a remaining NaN means a missing feature implementation or a leak
         #    from a non-history feature, which we surface loudly.
         final_arrays = []
-        for key in self.bin_feature_names:
+        for key in self.candidate_feature_names:
             if key not in features:
                 raise ValueError(
                     f"Requested feature '{key}' was not calculated by the pipeline."
@@ -897,7 +1085,7 @@ class BaseBlancoEnv(gym.Env, ABC):
             #     f"replacement: {arr}"
             # )
             final_arrays.append(arr)
-        assert len(final_arrays) == len(self.bin_feature_names), (
+        assert len(final_arrays) == len(self.candidate_feature_names), (
             "Number of final arrays should match number of requested bin features"
         )
 
@@ -959,15 +1147,64 @@ class BaseBlancoEnv(gym.Env, ABC):
     # Action / observation spaces and masks
     # -----------------------------------------------------------------------
 
-    def _setup_action_and_obs_spaces(self, state_dim, bin_state_dim):
-        if self.include_bin_features:
-            bin_state_shape = (self.nbins, bin_state_dim)
+    def _command_to_action(self, command: dict) -> dict:
+        """Validate a physical command and translate it to the internal (bin, field_id, filter_idx) action.
+
+        The pointing must equal a candidate field's (RA, Dec) exactly and, outside replay mode, be allowed by
+        the current mask; otherwise the command is rejected before any state changes.
+
+        Parameters
+        ----------
+        command : dict
+            {'pointing': (RA, Dec) float64 radians, 'filter': int, 'wait': 0 or 1}.
+
+        Returns
+        -------
+        dict
+            Internal action; 'bin' is WAIT_SIGNAL for a wait, else the field's grid bin (bookkeeping only).
+        """
+        assert self.action_space.contains(command), f"Invalid command {command}"
+        if int(command['wait']):
+            return {'bin': np.int32(WAIT_SIGNAL), 'field_id': np.int32(self._field_id),
+                    'filter_idx': np.int32(self._filter_idx)}
+        ra, dec = (float(x) for x in command['pointing'])
+        field_id = self._coord_to_field.get((ra, dec))
+        if field_id is None:
+            raise ValueError(f"Commanded pointing ({ra}, {dec}) matches no candidate field.")
+        filter_idx = int(command['filter'])
+        if not self._replay_mode and not self._action_mask[field_id * self.nfilters + filter_idx]:
+            raise ValueError(f"Field {field_id} in filter {filter_idx} is not observable now.")
+        if self.hpGrid.is_azel:
+            lon, lat = ephemerides.equatorial_to_topographic(ra=ra, dec=dec, time=self._ts)
+        else:
+            lon, lat = ra, dec
+        grid_bin = self.hpGrid.ang2idx(lon=lon, lat=lat)
+        return {'bin': np.int32(grid_bin if grid_bin is not None else 0), 'field_id': np.int32(field_id),
+                'filter_idx': np.int32(filter_idx)}
+
+    def _setup_action_and_obs_spaces(self, state_dim, candidate_state_dim):
+        if self.field_level:
+            # Fixed spaces: candidates are a variable-length list in the observation, the action is a pointing.
+            self.observation_space = gym.spaces.Dict({
+                "global_state": gym.spaces.Box(-1e5, 1e5, shape=(state_dim,), dtype=np.float32),
+                "candidate_state": gym.spaces.Sequence(
+                    gym.spaces.Box(-1e5, 1e5, shape=(candidate_state_dim,), dtype=np.float32), stack=True),
+            })
+            self.action_space = gym.spaces.Dict({
+                "pointing": gym.spaces.Box(np.array([0.0, -np.pi / 2]), np.array([2 * np.pi, np.pi / 2]),
+                                           dtype=np.float64),
+                "filter": gym.spaces.Discrete(self.nfilters),
+                "wait": gym.spaces.Discrete(2),
+            })
+            return
+        if self.include_candidate_features:
+            bin_state_shape = (self.nbins, candidate_state_dim)
         else:
             bin_state_shape = (0,)
 
         self.observation_space = gym.spaces.Dict({
             "global_state": gym.spaces.Box(-1e5, 1e5, shape=(state_dim,), dtype=np.float32),
-            "bin_state": gym.spaces.Box(-1e5, 1e5, shape=bin_state_shape, dtype=np.float32),
+            "candidate_state": gym.spaces.Box(-1e5, 1e5, shape=bin_state_shape, dtype=np.float32),
         })
 
         smallest_sentinel = min([WAIT_SIGNAL, ZENITH_BIN_NUM])
@@ -981,7 +1218,7 @@ class BaseBlancoEnv(gym.Env, ABC):
                 start=min([WAIT_SIGNAL, ZENITH_FIELD_ID]),
             ),
             "filter_idx": gym.spaces.Discrete(
-                _NUM_FILTERS - smallest_sentinel,
+                self.nfilters - smallest_sentinel,
                 start=min([WAIT_SIGNAL, ZENITH_FILTER_IDX]),
             ),
         })
@@ -998,6 +1235,8 @@ class BaseBlancoEnv(gym.Env, ABC):
 
     def _update_action_masks(self):
         """Construct the action mask based on airmass / horizon / completion."""
+        if self.field_level:
+            return self._update_field_action_mask()
         sun_radec = ephemerides.get_source_ra_dec('sun', time=self._ts)
         _, sun_el = ephemerides.equatorial_to_topographic(sun_radec[0], sun_radec[1], time=self._ts)
 
@@ -1006,27 +1245,22 @@ class BaseBlancoEnv(gym.Env, ABC):
 
             if self.do_filt:
                 self._action_mask = np.zeros(
-                    shape=(self.nbins * _NUM_FILTERS,), dtype=bool
+                    shape=(self.nbins * self.nfilters,), dtype=bool
                 )
             else:
                 self._action_mask = np.zeros(shape=self.nbins, dtype=bool)
             self._valid_fields_per_bin = defaultdict(list)
+            self._visible_bin_mask = np.zeros(shape=self.nbins, dtype=bool)
             return self._action_mask
 
         fields_az, fields_el = ephemerides.equatorial_to_topographic(
             ra=self._ra_arr, dec=self._dec_arr, time=self._ts
         )
-        mask_above_horizon = fields_el > 0
-        airmass = np.zeros_like(fields_el)
-        airmass[mask_above_horizon] = 1 / np.cos(
-            90 * units.deg - fields_el[mask_above_horizon]
-        )
-        airmass[~mask_above_horizon] = 10  # sentinel
+        # Airmass limit and the equatorial mount's HA/Dec envelope.
         effective_airmass_limit = min(self.airmass_limit, self.airmass_failsafe)
-        mask_visibility = airmass < effective_airmass_limit
-
-        # Equatorial mount cannot track past the per-Dec hour-angle envelope.
-        mask_visibility = mask_visibility & self._equatorial_envelope_mask()
+        mask_visibility = self._telescope.visible(
+            fields_el, astropy_ephem.hour_angle(self._ra_arr, self._ts, self._telescope.site.lon), self._dec_arr, effective_airmass_limit
+        )
 
         sel_valid = self._survey_progress_tracker.get_incomplete_mask()
         if self.do_filt:
@@ -1051,7 +1285,7 @@ class BaseBlancoEnv(gym.Env, ABC):
         clean_bins = np.array(valid_field_bins)[valid_bin_mask].astype(int)
 
         if self.do_filt:
-            action_mask = np.zeros(shape=(self.nbins, _NUM_FILTERS), dtype=bool)
+            action_mask = np.zeros(shape=(self.nbins, self.nfilters), dtype=bool)
             clean_ff = sel_valid[sel_valid_fields][valid_bin_mask]
             np.logical_or.at(action_mask, clean_bins, clean_ff)
             action_mask = action_mask.flatten()
@@ -1066,7 +1300,47 @@ class BaseBlancoEnv(gym.Env, ABC):
             self._valid_fields_per_bin[b].append(fid)
 
         self._action_mask = action_mask
+        self._visible_bin_mask = self._compute_visible_bin_mask()
         return action_mask
+
+    def _compute_visible_bin_mask(self, timestamp: float | None = None) -> np.ndarray:
+        """Boolean mask over HEALPix bins observable at a given timestamp.
+
+        Evaluates the horizon, airmass, and equatorial-envelope constraints at
+        each bin center rather than at catalog fields, so a bin counts as
+        visible even when no field currently lives in it. This is the "sky as
+        if fully populated" view the filter-first decoder uses to score filter
+        preference in the dense regime the policy was trained on, decoupled
+        from sparse ("island") field layouts. It is not a legality mask and
+        does not gate `step`.
+
+        Args
+        ----
+        timestamp: Unix time to evaluate the mask at. Defaults to the env's
+            current timestamp. Pass an explicit value to compute the mask
+            off-line (e.g. for one-step-ahead evaluation). Ignored for alt-az
+            grids (time-invariant bins).
+
+        Returns
+        -------
+        Boolean array of shape ``(nbins,)``; True where the bin center clears
+        the horizon, airmass, and (for equatorial mounts) HA/Dec envelope.
+        """
+        ts = self._ts if timestamp is None else timestamp
+        lon = self.hpGrid.lon  # [nbins] radians (az if azel grid, else ra)
+        lat = self.hpGrid.lat  # [nbins] radians (el if azel grid, else dec)
+
+        if self.hpGrid.is_azel:
+            bin_el = lat
+        else:
+            _, bin_el = ephemerides.equatorial_to_topographic(
+                ra=lon, dec=lat, time=ts
+            )
+
+        # Equatorial mount HA/Dec envelope is skipped for alt-az grids, where bin centers carry no RA.
+        ha = None if self.hpGrid.is_azel else astropy_ephem.hour_angle(lon, ts, self._telescope.site.lon)
+        effective_airmass_limit = min(self.airmass_limit, self.airmass_failsafe)
+        return self._telescope.visible(bin_el, ha, lat, effective_airmass_limit)
 
     # -----------------------------------------------------------------------
     # Construction-time hook and feature validation
@@ -1077,7 +1351,7 @@ class BaseBlancoEnv(gym.Env, ABC):
 
         Concrete subclasses MUST call this as the last line of
         __init__. Three kinds of check, dispatched off
-        `_FEATURE_REQUIREMENTS`:
+        `_feature_requirements(self._survey.filters)`:
 
           * ('hook', name) — type(self) overrides the named method
           * ('attr', name) — getattr(self, name) is not None
@@ -1086,8 +1360,9 @@ class BaseBlancoEnv(gym.Env, ABC):
         cls = type(self)
         issues: list[str] = []
 
+        requirements = _feature_requirements(self._survey.filters)
         for feat in self.global_feature_names:
-            for kind, target in _FEATURE_REQUIREMENTS.get(feat, []):
+            for kind, target in requirements.get(feat, []):
                 if kind == "hook":
                     if not self._is_hook_overridden(target):
                         issues.append(
@@ -1120,8 +1395,8 @@ class BaseBlancoEnv(gym.Env, ABC):
         # if self._has_historical_features and self.lookups.total_ot_sec is None:
         #     raise ValueError(
         #         f"{cls.__name__}: bin features include staleness/history terms "
-        #         f"(found in bin_feature_names: "
-        #         f"{[b for b in self.bin_feature_names if any(k in b for k in _STALENESS_BASE_KEYS)]}) "
+        #         f"(found in candidate_feature_names: "
+        #         f"{[b for b in self.candidate_feature_names if any(k in b for k in _STALENESS_BASE_KEYS)]}) "
         #         f"but lookups.total_ot_sec is None. This must be the same "
         #         f"normalization constant the policy was trained with — typically "
         #         f"loaded from the training data directory's total_ot_seconds file."

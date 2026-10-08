@@ -8,17 +8,20 @@ import re
 
 
 from blancops.data.features.glob_features import get_night_boundaries
+from blancops.io.file_io import (
+    _add_night, _add_timestamp, _drop_nan_dts,
+    _replace_with_pd_dt, fits_to_df
+)
 from blancops.math import units
 
-from blancops.configs.constants import DES_DATA_DIR, DES_FITS_PATH
-from blancops.configs.constants import FILTER2IDX
+from blancops.configs.paths import workspace
 from blancops.data.lookup_tables import TrainLookupTables
-from blancops.io.fits_io import preprocess_fits
 from blancops.math import units
 
 import logging
 
-from blancops.survey.profiles import DES
+from blancops.survey.profiles import DES, SurveyProfile
+from blancops.configs.enums import AcceptanceRule
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +65,16 @@ _DES_UNWANTED_OBJECTS = [
     "NGC",
     "ec",
     ]
+
+
+
+def preprocess_fits(fits_path): # XXX move to preprocessing.py
+    df = fits_to_df(fits_path)
+    df = df.pipe(_replace_with_pd_dt)\
+            .pipe(_drop_nan_dts)\
+            .pipe(_add_timestamp)\
+            .pipe(_add_night)
+    return df
 
 
 def load_and_process_historic_data(
@@ -113,7 +126,7 @@ def load_and_process_historic_data(
     pd.DataFrame
         Cleaned observations sorted by timestamp with a reset index.
     """
-    assert fits_path is not None or df is not None, "Provide either fits_path or df."
+    assert (fits_path is None) != (df is None), "Provide either fits_path or df, not both."
     if df is None:
         df = preprocess_fits(fits_path)
 
@@ -130,6 +143,44 @@ def load_and_process_historic_data(
     df = df.sort_values(by='timestamp').reset_index(drop=True)
 
     return df
+
+def find_interruptions(survey_df: pd.DataFrame, archive_df: pd.DataFrame) -> pd.DataFrame:
+    """Survey exposures preceded, since the previous survey exposure of the night, by any other archived exposure.
+
+    Exposure numbers increase with time, so an archived exposure strictly between two consecutive survey
+    exposures of a night means the telescope pointed elsewhere in between. The pointing and filter of the
+    last such exposure are where the next survey slew starts.
+
+    Parameters
+    ----------
+    survey_df : pd.DataFrame
+        Selected survey exposures with expnum and night.
+    archive_df : pd.DataFrame
+        Every archived exposure (all programs) with expnum, ra and dec in degrees, and filter.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per interrupted survey exposure: expnum, interrupt_ra, interrupt_dec (radians),
+        interrupt_filter.
+    """
+    arch = archive_df[['expnum', 'ra', 'dec', 'filter']].dropna(subset=['expnum']).sort_values('expnum')
+    arch_exp = arch['expnum'].to_numpy(dtype=np.int64)
+    survey = survey_df[['expnum', 'night']].sort_values('expnum')
+    cur = survey['expnum'].to_numpy(dtype=np.int64)
+    prev = survey.groupby('night', sort=False)['expnum'].shift(1).to_numpy()
+    last_idx = np.searchsorted(arch_exp, cur, side='left') - 1
+    has_prev = ~np.isnan(prev)
+    last_exp = np.where(last_idx >= 0, arch_exp[np.clip(last_idx, 0, None)], -1)
+    interrupted = has_prev & (last_exp > np.nan_to_num(prev, nan=np.inf))
+    last = arch.iloc[last_idx[interrupted]]
+    return pd.DataFrame({
+        'expnum': cur[interrupted],
+        'interrupt_ra': last['ra'].to_numpy(dtype=float) * units.deg,
+        'interrupt_dec': last['dec'].to_numpy(dtype=float) * units.deg,
+        'interrupt_filter': last['filter'].astype(str).to_numpy(),
+    })
+
 
 def _apply_selection_criteria(df, selections: list):
     sel_mask = np.ones(len(df), dtype=bool)
@@ -323,23 +374,31 @@ def _add_field_col(df):
     return df
 
 
-def build_DES_lookups(fits_path=None, outdir=None):
+def build_DES_lookups(fits_path=None, outdir=None, acceptance: AcceptanceRule | str = AcceptanceRule.UNIFORM,
+                      survey: SurveyProfile = DES):
     """Build and persist the DES TrainLookupTables from a raw FITS catalog.
 
     Loads and cleans the historic DECam observations, factorizes fields to
     contiguous field_ids (0..N-1), and constructs the per-(field, filter)
     target counts and exposure times plus start-of-night visit and last-visit
     snapshots (in both timestamp and observing-time frames). Only observations
-    passing the survey teff quality threshold contribute to targets and running
-    history, while all observed nights are snapshotted so every night is
-    seedable. Writes the assembled tables under outdir and returns them.
+    passing the acceptance rule's per-band teff thresholds contribute to
+    targets and running history, while all observed nights are snapshotted so
+    every night is seedable. Writes the assembled tables under outdir and
+    returns them.
 
     Parameters
     ----------
     fits_path : str or Path, optional
-        Source FITS catalog. Defaults to DES_FITS_PATH.
+        Source FITS catalog. Defaults to ``workspace().des_fits``.
     outdir : str or Path, optional
-        Destination directory for the written tables. Defaults to DES_DATA_DIR.
+        Destination directory for the written tables. Defaults to ``workspace().des_data``.
+    acceptance : AcceptanceRule or str, optional
+        Rule selecting the per-band minimum teff an exposure needs to count
+        toward the survey. Defaults to ``AcceptanceRule.UNIFORM``.
+    survey : SurveyProfile, optional
+        Survey supplying the filters, sun elevation limit, and acceptance
+        thresholds. Defaults to ``DES``.
 
     Returns
     -------
@@ -350,10 +409,10 @@ def build_DES_lookups(fits_path=None, outdir=None):
     ------
     ValueError
         If no observations survive the year/month/day/filter selection, or if
-        none exceed the survey teff threshold.
+        none exceed the acceptance teff thresholds.
     """
-    fits_path = Path(fits_path or DES_FITS_PATH).resolve()
-    outdir = Path(outdir or DES_DATA_DIR).resolve()
+    fits_path = Path(fits_path or workspace().des_fits).resolve()
+    outdir = Path(outdir or workspace().des_data).resolve()
 
     df = load_and_process_historic_data(fits_path=fits_path)
     if len(df) == 0: # Fixed the logical bug here: len(df) == 0 means no obs found
@@ -363,21 +422,23 @@ def build_DES_lookups(fits_path=None, outdir=None):
     # Require field_id is 0..N-1 contiguous
     field2idx = {obj_name: idx for idx, obj_name in enumerate(sorted(df['field'].unique()))}
     df['field_id'] = df['field'].map(field2idx)
-    df["filt_idx"] = df["filter"].map(FILTER2IDX)
+    df["filt_idx"] = df["filter"].map(survey.filter2idx)
 
     num_fields = df["field_id"].nunique()
-    nfilters = len(FILTER2IDX)
+    nfilters = survey.num_filters
 
     # Resolve survey-profile constants once for use below and in the night loop.
-    sun_el_limit = DES.sun_el_limit
-    valid_teff_threshold = DES.valid_teff_threshold
+    sun_el_limit = survey.sun_el_limit
+    band_threshold = survey.acceptance_thresholds(acceptance)  # [n_filters]
+    # teff's own dtype, as the scalar threshold compared (float32 0.3 is not above float32 0.3)
+    df["min_teff"] = band_threshold[df["filt_idx"].to_numpy()].astype(df["teff"].dtype)
 
     # Quality threshold — only targets and per-night history derive
     # from this set, so completion checks and seeded state agree.
-    valid_df = df[df["teff"] > valid_teff_threshold].copy()
+    valid_df = df[df["teff"] > df["min_teff"]].copy()
     if len(valid_df) == 0:
         raise ValueError(
-            f"No observations with teff > {valid_teff_threshold} in "
+            f"No observations above the '{acceptance}' teff thresholds in "
             f"{fits_path}; check input data quality."
         )
 
@@ -466,7 +527,7 @@ def build_DES_lookups(fits_path=None, outdir=None):
         night2fidfilt_last_visit_ot[night] = fidfilt_last_visit_ot.copy()
 
 
-        valid_night = night_df[night_df["teff"] > valid_teff_threshold]
+        valid_night = night_df[night_df["teff"] > night_df["min_teff"]]
         if len(valid_night):
             # Visit counts
             field_running += np.bincount(
@@ -544,9 +605,11 @@ def build_DES_lookups(fits_path=None, outdir=None):
         night2fid_last_visit_ot=night2fid_last_visit_ot,
         night2fidfilt_last_visit_ot=night2fidfilt_last_visit_ot,
         night2ot_clock_seconds=night2ot_clock_seconds,
+        acceptance=acceptance,
+        survey=survey,
         # total_ot_sec=total_observing_seconds,
     )
     lookups.write_to_disk(outdir)
-    logger.info(f" [+] Successfully generated all lookup tables in {outdir}")
+    logger.info(f" [+] Successfully generated all lookup tables in {outdir} (acceptance '{acceptance}')")
 
     return lookups

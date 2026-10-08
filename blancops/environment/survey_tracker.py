@@ -255,6 +255,31 @@ class SurveyProgressTracker:
     def check_completion(self) -> bool:
         """True iff every cell has met or exceeded its target."""
         return bool(np.all(self._counts >= self._target_counts))
+
+    def dispersion_index(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-filter dispersion of completion, D_b = Var_b(x) / m_b, and its random-visit baseline.
+
+        x = count / target over in-plan fields (target > 0), uncapped. For Poisson visits,
+        Var(x_f) = m_b / T_f, so the baseline is mean_f(1 / T_f): D_b below it means more even than random.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            (D_b, baseline_b), each shape (n_filters,) (shape (1,) for a field-only tracker); NaN where
+            a filter has no in-plan fields or m_b = 0.
+        """
+        counts = self._counts.reshape(len(self._counts), -1).astype(np.float64)       # [n_fields, n_filters]
+        targets = self._target_counts.reshape(len(self._counts), -1).astype(np.float64)
+        in_plan = targets > 0
+        n = in_plan.sum(axis=0)
+        x = np.divide(counts, targets, out=np.zeros_like(counts), where=in_plan)
+        inv_t = np.divide(1.0, targets, out=np.zeros_like(targets), where=in_plan)
+        mean = np.divide(x.sum(axis=0), n, out=np.full(n.shape, np.nan), where=n > 0)
+        sq_dev = np.where(in_plan, (x - np.nan_to_num(mean)) ** 2, 0.0).sum(axis=0)
+        var = np.divide(sq_dev, n, out=np.full(n.shape, np.nan), where=n > 0)
+        dispersion = np.divide(var, mean, out=np.full(n.shape, np.nan), where=(n > 0) & (mean > 0))
+        baseline = np.divide(inv_t.sum(axis=0), n, out=np.full(n.shape, np.nan), where=n > 0)
+        return dispersion, baseline
  
     # ---------------------------------------------------------------- repr
     def __repr__(self) -> str:

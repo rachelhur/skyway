@@ -9,6 +9,8 @@ import json
 import torch
 import logging
 
+from blancops.configs.paths import RunPaths
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +36,7 @@ class Checkpointer:
         
         # Tracks our best models: list of dicts [{'filepath': str, 'metric': float}]
         self.best_checkpoints = [] 
-        self._history_file = self.outdir / "checkpoint_history.json"
+        self._history_file = self.outdir / RunPaths.CHECKPOINT_HISTORY
 
         if hard_overwrite:
             self._hard_reset()
@@ -51,6 +53,24 @@ class Checkpointer:
                     self.best_checkpoints = json.load(f)
             except json.JSONDecodeError:
                 logger.warning("Could not read checkpoint history. Starting fresh.")
+
+    def _soft_reset(self):
+        """Start a fresh top-k history; existing checkpoint files stay on disk."""
+        self.best_checkpoints = []
+        self._save_history()
+
+    def _hard_reset(self):
+        """Delete every file this Checkpointer writes (top-k, periodic, latest, deployment model, history).
+
+        Other files in the directory, such as the split dataset caches, are left alone.
+        """
+        owned = [*self.outdir.glob(RunPaths.BEST_CHECKPOINT_GLOB), *self.outdir.glob(RunPaths.PERIODIC_CHECKPOINT_GLOB),
+                 self.outdir / RunPaths.LATEST_CHECKPOINT, self.outdir / RunPaths.MODEL_PT, self._history_file]
+        removed = [p for p in owned if p.exists()]
+        for p in removed:
+            p.unlink()
+        logger.info(f"Hard overwrite: removed {len(removed)} checkpoint files from {self.outdir}")
+        self.best_checkpoints = []
 
     def _save_history(self):
         with open(self._history_file, 'w') as f:
@@ -86,7 +106,7 @@ class Checkpointer:
         }
         
         # Always save latest for resume
-        torch.save(checkpoint, self.outdir / 'latest_checkpoint.pt')
+        torch.save(checkpoint, self.outdir / RunPaths.LATEST_CHECKPOINT)
         
         if not is_best:
             return
@@ -143,7 +163,30 @@ class Checkpointer:
         assert 0 < len(self.best_checkpoints) <= self.top_k
 
 
-    def export_deployment_model(self, policy, norm_stats: dict, filename="model.pt"):
+    def save_periodic(self, algorithm, path: Path, epoch: int, val_metrics: dict, norm_stats: dict = None) -> None:
+        """Save weights for one epoch regardless of the checkpoint metric, so the epoch can be re-picked later.
+
+        Parameters
+        ----------
+        algorithm : AlgorithmBase
+            Algorithm whose policy weights are saved.
+        path : Path
+            Output file (RunPaths.periodic_checkpoint).
+        epoch : int
+            Training epoch.
+        val_metrics : dict
+            Validation metrics of this epoch, metric name -> float.
+        norm_stats : dict, optional
+            Normalization stats needed to run the policy.
+        """
+        torch.save({
+            'policy_state_dict': algorithm.policy.state_dict(),
+            'epoch': epoch,
+            'val_metrics': val_metrics,
+            'norm_stats': norm_stats,
+        }, path)
+
+    def export_deployment_model(self, policy, norm_stats: dict, filename=RunPaths.MODEL_PT):
         """Saves a stripped-down, prefix-free state dict for deployment."""
         raw_state_dict = policy.state_dict()
         clean_state_dict = {}
@@ -167,7 +210,8 @@ def resolve_weights_path(model_dir: Path, filename: str = None) -> Path:
         3. best from history: basename of history[0] joined to checkpoints/
     """
     model_dir = Path(model_dir)
-    checkpoints_dir = model_dir / "checkpoints"
+    run_paths = RunPaths(model_dir)
+    checkpoints_dir = run_paths.checkpoints
 
     # 1. User-specified file.
     if filename:
@@ -176,12 +220,12 @@ def resolve_weights_path(model_dir: Path, filename: str = None) -> Path:
         return checkpoints_dir / filename
 
     # 2. Deployment artifact (preferred for live/offline scheduling).
-    for model_pt in (checkpoints_dir / "model.pt", model_dir / "model.pt"):
+    for model_pt in (run_paths.model_pt, model_dir / RunPaths.MODEL_PT):
         if model_pt.exists():
             return model_pt
 
     # 3. Best checkpoint from training history (resolve by basename only).
-    history_file = checkpoints_dir / "checkpoint_history.json"
+    history_file = run_paths.checkpoint_history
     if history_file.exists():
         with open(history_file, "r") as f:
             history = json.load(f)

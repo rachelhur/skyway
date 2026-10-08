@@ -375,56 +375,16 @@ def plot_fields(
     return skymap
 
 
-def plot_fields_movie(outfile, times, field_pos, schedule_label=""):
-    """
-    Creates a gif of fields observed over the course of a night.
-
-    Arguments
-    ---------
-    outfile : str
-        Path to output gif file.
-    times : list of float
-        List of times (Unix timestamps, in UTC) of observations.
-    field_pos : list of float tuples
-        List of field (ra, dec) for each observation.
-    schedule_label : str [""]
-        Optional label to append to the plot title (e.g., "Expert Schedule").
-    """
-
-    # ensure output file is gif
-    if os.path.splitext(outfile)[-1] not in [".gif"]:
-        raise NotImplementedError("Only animated gif currently supported.")
-
-    # create temporary directory for temporary png files
-    tmpdir = tempfile.mkdtemp()
-
-    # ensure positions are numpy array
-    field_pos = np.asarray(field_pos)
-
-    # plot each observation successively, saving pngs
-    plt.ioff()
-    for i, time in enumerate(tqdm(times)):
-        skymap = plot_fields(
-            time,
-            current_radec=field_pos[i, :],
-            completed_radec=field_pos[:i, :],
-            future_radec=field_pos[i + 1 :, :],
-            schedule_label=schedule_label,
-        )
-        plt.savefig(os.path.join(tmpdir, "field_%08i.png" % i))
-        plt.close(skymap.fig)
-    plt.ion()
-
-    # convert pngs to gif
-    pngs = sorted(glob.glob(os.path.join(tmpdir, "*.png")))
-    if not pngs:
-        shutil.rmtree(tmpdir)
-        raise RuntimeError("No PNG frames were generated for plot_fields_movie()")
-    images = [imageio.imread(p) for p in pngs]
-    imageio.mimsave(outfile, images, duration=0.10, loop=0)
-    shutil.rmtree(tmpdir)
-
-    return
+# plot_fields options for drawing fields on top of a plot_bins map
+_FIELD_OVERLAY_KWARGS = dict(
+    plot_zenith=False,
+    plot_airmass=0,
+    plot_galaxy=False,
+    plot_moon=False,
+    current_kwargs={"edgecolor": "darkgreen", "c": "forestgreen", "s": 60},
+    completed_kwargs={"edgecolor": "seagreen", "c": "none", "s": 60},
+    future_kwargs={"edgecolor": "silver", "s": 60},
+)
 
 
 def plot_bins(
@@ -647,17 +607,17 @@ def plot_bins(
     return skymap
 
 
-def plot_bins_movie(
-    outfile,
-    nside,
-    times,
-    idxs,
-    alternate_idxs=None,
-    sky_bin_mapping=None,
-    field_pos=None,
-    is_azel=False,
-    schedule_label="",
-):
+def plot_schedule_movie(
+    outfile: str,
+    times: np.ndarray,
+    field_pos: np.ndarray | None = None,
+    bin_idxs: np.ndarray | None = None,
+    alternate_bin_idxs: np.ndarray | None = None,
+    nside: int | None = None,
+    is_azel: bool = False,
+    sky_bin_mapping: dict | None = None,
+    schedule_label: str = "",
+) -> None:
     """
     Creates a gif of fields observed over the course of a night.
 
@@ -665,25 +625,31 @@ def plot_bins_movie(
     ---------
     outfile : str
         Path to output gif file.
-    nside : int
-        nside used to make the ephemerides.HealpixGrid
     times : list of float
         List of times (Unix timestamps, in UTC) of observations.
-    idxs : list of float
-        List of bin indices for each observation.
-    alternate_idxs : list of float [None]
-        List of alternate bin indices for each observation. Defaults to copy bins
-    sky_bin_mapping : dict [None]
-        If provided, is used to validate that the recreated healpix grid matches the
-        provided grid.
     field_pos : list of float tuples [None]
         List of field (ra, dec) for each observation. If provided, plots specific fields
         overlaid on the bins
+    bin_idxs : list of float [None]
+        List of bin indices for each observation. If provided, plots the sky bins
+    alternate_bin_idxs : list of float [None]
+        List of alternate bin indices for each observation. Defaults to copy bins
+    nside : int [None]
+        nside used to make the ephemerides.HealpixGrid. Required if bin_idxs provided.
     is_azel : bool [False]
         whether the ephemerides.HealpixGrid uses az/el (True) or RA/Dec coords (False)
+    sky_bin_mapping : dict [None]
+        If provided, is used to validate that the recreated healpix grid matches the
+        provided grid.
     schedule_label : str [""]
         Optional label to append to the plot title (e.g., "Expert Schedule").
     """
+
+    # check required arguments
+    if field_pos is None and bin_idxs is None:
+        raise ValueError("Must provide field_pos and/or bin_idxs")
+    if bin_idxs is not None and nside is None:
+        raise ValueError("Must specify nside if plotting bin_idxs")
 
     # ensure output file is gif
     if os.path.splitext(outfile)[-1] not in [".gif"]:
@@ -693,28 +659,28 @@ def plot_bins_movie(
     tmpdir = tempfile.mkdtemp()
 
     # duplicate bins if alternate bins is not given
-    alternate_idxs = alternate_idxs if alternate_idxs is not None else idxs
+    alternate_bin_idxs = alternate_bin_idxs if alternate_bin_idxs is not None else bin_idxs
 
     # make sure field pos is numpy array
     field_pos = None if field_pos is None else np.asarray(field_pos)
 
     # plot each observation successively, saving pngs
     plt.ioff()
-    for i, (time, idx, alternate_idx) in enumerate(
-        zip(tqdm(times), idxs, alternate_idxs)
-    ):
+    for i, time in enumerate(tqdm(times)):
         # plot the sky bins
-        skymap = plot_bins(
-            time,
-            current_idx=idx,
-            alternate_idx=alternate_idx,
-            completed_idxs=idxs[:i],
-            future_idxs=idxs[i + 1 :],
-            nside=nside,
-            sky_bin_mapping=sky_bin_mapping,
-            is_azel=is_azel,
-            schedule_label=schedule_label,
-        )
+        skymap = None
+        if bin_idxs is not None:
+            skymap = plot_bins(
+                time,
+                current_idx=bin_idxs[i],
+                alternate_idx=alternate_bin_idxs[i],
+                completed_idxs=bin_idxs[:i],
+                future_idxs=bin_idxs[i + 1 :],
+                nside=nside,
+                sky_bin_mapping=sky_bin_mapping,
+                is_azel=is_azel,
+                schedule_label=schedule_label,
+            )
 
         # plot the sky fields on the sky map
         if field_pos is not None:
@@ -723,16 +689,9 @@ def plot_bins_movie(
                 current_radec=field_pos[i, :],
                 completed_radec=field_pos[:i, :],
                 future_radec=field_pos[i + 1 :, :],
-                plot_zenith=False,
-                plot_airmass=0,
-                plot_galaxy=False,
-                plot_moon=False,
-                observer=None,
                 skymap=skymap,
                 schedule_label=schedule_label,
-                current_kwargs={"edgecolor": "darkgreen", "c": "forestgreen", "s": 60},
-                completed_kwargs={"edgecolor": "seagreen", "c": "none", "s": 60},
-                future_kwargs={"edgecolor": "silver", "s": 60},
+                **(_FIELD_OVERLAY_KWARGS if bin_idxs is not None else {}),
             )
 
         # save the figure
@@ -744,7 +703,7 @@ def plot_bins_movie(
     pngs = sorted(glob.glob(os.path.join(tmpdir, "*.png")))
     if not pngs:
         shutil.rmtree(tmpdir)
-        raise RuntimeError("No PNG frames were generated for plot_fields_movie()")
+        raise RuntimeError("No PNG frames were generated for plot_schedule_movie()")
     images = [imageio.imread(p) for p in pngs]
     imageio.mimsave(outfile, images, duration=0.10, loop=0)
     shutil.rmtree(tmpdir)
@@ -962,6 +921,55 @@ def plot_schedule_whole(
     return
 
 
+def _lookup_field_pos(field_ids, field_id2pos):
+    """
+    Map a column of field ids to (ra, dec) positions.
+
+    Field ids read from a schedule csv are floats when the column holds missing
+    values, so they are matched against the mapping both as-written and coerced
+    to an integer key.
+
+    Arguments
+    ---------
+    field_ids : pandas.Series
+        Field ids for each observation.
+    field_id2pos : dict
+        Maps field id (as a string key) to (ra, dec) in radians.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape (n_obs, 2) holding (ra, dec) in radians, with NaN where
+        the field id was missing from the mapping.
+    """
+    positions = []
+    n_missing = 0
+    for fid in field_ids.values:
+        pos = field_id2pos.get(str(fid))
+        if pos is None:
+            try:
+                pos = field_id2pos.get(str(int(float(fid))))
+            except (TypeError, ValueError):
+                pos = None
+        if pos is None:
+            n_missing += 1
+            pos = [np.nan, np.nan]
+        positions.append(pos)
+
+    if n_missing == len(positions):
+        raise KeyError(
+            "None of the %i field ids were found in the field mapping; "
+            "check that the mapping matches the schedule." % len(positions)
+        )
+    if n_missing:
+        print(
+            "Warning: %i of %i field ids missing from the field mapping."
+            % (n_missing, len(positions))
+        )
+
+    return np.asarray(positions, dtype=float)
+
+
 def plot_schedule_from_file(
     outfile,
     schedule_file,
@@ -988,7 +996,8 @@ def plot_schedule_from_file(
     schedule_file : str
         Path to the schedule CSV file with keys "expert_timestamp" and/or
         "agent_timestamp", plus some combination of "expert_field_id", "agent_field_id",
-        "expert_bin_id", "agent_bin_id".
+        "expert_bin_id", "agent_bin_id". Without compare, unprefixed "timestamp",
+        "field_id", "bin_id" columns are also accepted.
     plot_type : str
         Type of plot: "field", "bin", or "fieldbin".
     nside : int [None]
@@ -1046,6 +1055,12 @@ def plot_schedule_from_file(
     primary_time_key = f"{primary_prefix}_timestamp"
     alternate_time_key = f"{alternate_prefix}_timestamp"
 
+    # single-schedule CSVs (e.g. offline runner nights/) use unprefixed columns
+    if not compare and primary_time_key not in schedule.columns and "timestamp" in schedule.columns:
+        schedule = schedule.rename(
+            columns={c: f"{primary_prefix}_{c}" for c in ("timestamp", "field_id", "bin_id")}
+        )
+
     # check for required columns
     if primary_time_key not in schedule.columns:
         raise KeyError(f'Missing "{primary_time_key}" required to make requested plot.')
@@ -1094,15 +1109,11 @@ def plot_schedule_from_file(
     if field_ids_1 is None or field_id2pos is None:
         field_pos_1 = None
     else:
-        field_pos_1 = np.asarray(
-            [field_id2pos.get(str(fid), [None, None]) for fid in field_ids_1.values]
-        )
+        field_pos_1 = _lookup_field_pos(field_ids_1, field_id2pos)
     if field_ids_2 is None or field_id2pos is None:
         field_pos_2 = None
     else:
-        field_pos_2 = np.asarray(
-            [field_id2pos.get(str(fid), [None, None]) for fid in field_ids_2.values]
-        )
+        field_pos_2 = _lookup_field_pos(field_ids_2, field_id2pos)
     bin_ids_1 = schedule.get(f"{primary_prefix}_bin_id", None)
     bin_ids_2 = schedule.get(f"{alternate_prefix}_bin_id", None) if compare else None
 
@@ -1152,26 +1163,18 @@ def plot_schedule_from_file(
                 schedule_label=slabel,
             )
 
-    # plot movies of just fields
-    elif plot_type == "field":
-        plot_fields_movie(
-            outfile=outfile,
-            times=times,
-            field_pos=field_pos_1,
-            schedule_label=primary_label,
-        )
-
-    # plot movies of bins or combined field+bin
+    # plot movies of fields, bins, or combined field+bin
     else:
-        plot_bins_movie(
+        do_bins = plot_type in ["bin", "fieldbin"]
+        plot_schedule_movie(
             outfile=outfile,
-            nside=nside,
             times=times,
-            idxs=bin_ids_1.values,
-            alternate_idxs=bin_ids_2.values if compare else None,
-            sky_bin_mapping=bin_id2pos,
-            field_pos=field_pos_1 if plot_type == "fieldbin" else None,
+            field_pos=field_pos_1 if plot_type in ["field", "fieldbin"] else None,
+            bin_idxs=bin_ids_1.values if do_bins else None,
+            alternate_bin_idxs=bin_ids_2.values if (do_bins and compare) else None,
+            nside=nside,
             is_azel=is_azel,
+            sky_bin_mapping=bin_id2pos,
             schedule_label=primary_label,
         )
 

@@ -2,16 +2,18 @@ import torch
 import numpy as np
 import logging
 
-from blancops.configs.constants import _FILTER_DEP_FEATURE_NAMES, FILTER2IDX
-from blancops.configs.rl_schema import NormalizationConfig
+from blancops.configs.constants import _FILTER_DEP_FEATURE_NAMES
+from blancops.configs.experiment_schema import NormalizationConfig
+from blancops.configs.enums import has_filter
+from blancops.survey.profiles import DES, SurveyProfile
 
 logger = logging.getLogger(__name__)
 
-def build_normalizer(state_feature_names, cfg):
-    norm_kwargs = build_normalizer_kwargs(cfg.data.norm, 'filter' in cfg.data.action_space)
-    return StateNormalizer(state_feature_names=state_feature_names, **norm_kwargs)
+def build_normalizer(state_feature_names, cfg, survey: SurveyProfile = DES):
+    norm_kwargs = build_normalizer_kwargs(cfg.data.norm, has_filter(cfg.data.action_space), survey=survey)
+    return StateNormalizer(state_feature_names=state_feature_names, survey=survey, **norm_kwargs)
 
-def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> dict:
+def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True, survey: SurveyProfile = DES) -> dict:
     """Translates the Pydantic schema into the exact kwargs expected by StateNormalizer."""
     kwargs = {
         'cyclical_feature_names': [],
@@ -35,7 +37,7 @@ def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> d
 
     for feature, requested_norms in norm_config.feature_norm_mappings.items():
         if do_filt and feature in _FILTER_DEP_FEATURE_NAMES:
-            feat_names = [f"{feature}_{filt}" for filt in FILTER2IDX.keys()]
+            feat_names = [f"{feature}_{filt}" for filt in survey.filters]
         else:
             feat_names = [feature]
         for feat_name in feat_names:
@@ -55,20 +57,20 @@ def build_normalizer_kwargs(norm_config: NormalizationConfig, do_filt=True) -> d
 
     return kwargs
 
-def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True):
+def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True, survey: SurveyProfile = DES):
     feature_names_out = []
     for feat_name in feature_names:
         has_filt_dep = do_filt and feat_name in _FILTER_DEP_FEATURE_NAMES
         if do_filt:
             # has_filt_dep = feat_name in _FILTER_DEP_FEATURE_NAMES
             if has_filt_dep:
-                [feature_names_out.append(f"{feat_name}_{filt}") for filt in FILTER2IDX.keys()] 
+                [feature_names_out.append(f"{feat_name}_{filt}") for filt in survey.filters]
 
         is_rel_feat = feat_name.startswith('rel_')
         is_delta_feat = feat_name.startswith('delta_')
         never_cyclic_feat = is_rel_feat or is_delta_feat
         is_cyclic = any((feat_name == cyc_feat) or feat_name.endswith(f"_{cyc_feat}") for cyc_feat in cyclical_feature_names)
-        
+
         is_cyclic = is_cyclic and not never_cyclic_feat
         if is_cyclic:
             logger.debug(f"Expanding {feat_name} to {feat_name}_cos and {feat_name}_sin")
@@ -78,20 +80,21 @@ def expand_feature_set(feature_names, cyclical_feature_names, do_filt=True):
     return feature_names_out
 
 
-def _base_feature_name(name: str) -> str:
+def _base_feature_name(name: str, survey: SurveyProfile = DES) -> str:
     # Strip filter suffix
-    for filt in FILTER2IDX.keys():
+    for filt in survey.filters:
         if name.endswith(f"_{filt}"):
             name = name[: -(len(filt) + 1)]
             break
     return name
 
 
-def setup_feature_names(base_global_feature_names, base_bin_feature_names, cyclical_feature_names, do_cyclical_norm, do_filt):
+def setup_feature_names(base_global_feature_names, base_bin_feature_names, cyclical_feature_names, do_cyclical_norm, do_filt,
+                        survey: SurveyProfile = DES):
     """Expands feature list to include filter dependence and cyclical normalizations where applicable."""
     if do_cyclical_norm:
-        global_feature_names = expand_feature_set(base_global_feature_names.copy(), cyclical_feature_names, do_filt)
-        bin_feature_names = expand_feature_set(base_bin_feature_names.copy(), cyclical_feature_names, do_filt)
+        global_feature_names = expand_feature_set(base_global_feature_names.copy(), cyclical_feature_names, do_filt, survey)
+        bin_feature_names = expand_feature_set(base_bin_feature_names.copy(), cyclical_feature_names, do_filt, survey)
     else:
         global_feature_names = base_global_feature_names.copy()
         bin_feature_names = base_bin_feature_names.copy()
@@ -108,8 +111,66 @@ def apply_cyclical_features(features, base_names, cyclical_names):
         if any(name == cyc or name.endswith(f"_{cyc}") for cyc in cyclical_names):
             features[f"{name}_cos"] = np.cos(features[name])
             features[f"{name}_sin"] = np.sin(features[name])
-            
-            
+
+
+def _mask_cols(mask):
+    """Integer column indices of a boolean feature mask."""
+    if torch.is_tensor(mask):
+        mask = mask.cpu().numpy()
+    return np.where(np.asarray(mask))[0]
+
+
+def _column_stats(state, train_state_idxs, mask, is_torch):
+    """NaN-aware mean and population std per masked column, over train rows.
+
+    Runs one column at a time so the masked copy of the whole state array is
+    never materialized; at nside 32 that copy is tens of GB.
+
+    Args:
+        state: (..., n_features) array or tensor.
+        train_state_idxs: Row indices contributing to the statistics.
+        mask: Boolean mask over the feature axis.
+        is_torch: Whether state is a torch tensor.
+
+    Returns:
+        Tuple of per-column mean and std, ordered as the masked columns.
+    """
+    idxs = torch.as_tensor(train_state_idxs) if is_torch else train_state_idxs
+    means, stds = [], []
+    for c in _mask_cols(mask):
+        col = state[..., c][idxs]
+        if is_torch:
+            mn = torch.nanmean(col)
+            sd = torch.clamp(torch.sqrt(torch.nanmean((col - mn) ** 2)), min=1e-6)
+        else:
+            mn = np.nanmean(col)
+            sd = np.clip(np.nanstd(col), a_min=1e-6, a_max=None)
+        means.append(mn)
+        stds.append(sd)
+    if is_torch:
+        return torch.stack(means), torch.stack(stds)
+    return np.array(means, dtype=np.float32), np.array(stds, dtype=np.float32)
+
+
+def _scale_columns_inplace(state, mask, mean, std):
+    """Apply ``(x - mean) / std`` to masked columns in place, one column at a time.
+
+    ``state[..., c]`` is a view for both backends, so the arithmetic writes
+    straight into ``state`` without allocating a copy of the masked block.
+
+    Args:
+        state: Array or tensor, modified in place.
+        mask: Boolean mask over the feature axis.
+        mean: Per-column means, or None to divide only.
+        std: Per-column standard deviations.
+    """
+    for i, c in enumerate(_mask_cols(mask)):
+        col = state[..., c]
+        if mean is not None:
+            col -= mean[i]
+        col /= std[i]
+
+
 class StateNormalizer:
     """Applies and persists the per-feature normalization pipeline.
 
@@ -150,9 +211,11 @@ class StateNormalizer:
         fix_nans=True,
         do_cyclical_norm=None,
         cyclical_feature_names=None,
-        sentinel_value=-1
+        sentinel_value=-1,
+        survey: SurveyProfile = DES,
     ):
         self.feature_names = state_feature_names
+        self.survey = survey
 
         # Config Flags
         self.do_sin = do_sin_norm
@@ -181,7 +244,7 @@ class StateNormalizer:
         names = self.feature_names
 
         def matches(feat, allowed):
-            return feat in allowed or _base_feature_name(feat) in allowed
+            return feat in allowed or _base_feature_name(feat, self.survey) in allowed
 
         self.masks = {
             'sin': np.array([matches(f, sin_feats) for f in names]),
@@ -202,7 +265,7 @@ class StateNormalizer:
         """Returns the appropriate math module and converts masks to the correct device."""
         is_torch = torch.is_tensor(state)
         math_backend = torch if is_torch else np
-        
+
         # Convert pre-computed numpy masks to torch bool tensors if necessary
         active_masks = {}
         for key, mask in self.masks.items():
@@ -210,7 +273,7 @@ class StateNormalizer:
                 active_masks[key] = torch.tensor(mask, dtype=torch.bool, device=state.device)
             else:
                 active_masks[key] = mask
-                
+
         return is_torch, math_backend, active_masks
 
     def fit_transform(self, state, train_state_idxs):
@@ -225,24 +288,14 @@ class StateNormalizer:
 
         # 1. Z-Score (Global Mean/Std)
         if self.do_z and m['z'].sum() > 0:
-            train_data = state[train_state_idxs][..., m['z']]
-            train_flat = train_data.reshape(-1, train_data.shape[-1])
-
-            mean = backend.nanmean(train_flat, dim=0) if is_torch else np.nanmean(train_flat, axis=0)
-            std = self._calc_std(train_flat, mean, backend, is_torch)
-
-            state[..., m['z']] = (state[..., m['z']] - mean) / std
+            mean, std = _column_stats(state, train_state_idxs, m['z'], is_torch)
+            _scale_columns_inplace(state, m['z'], mean, std)
             z_stats_out = self._build_stats_dict(self.active_features['z'], mean, std)
 
         # 2. Relative Local Mean Z-Score (Global Std only)
         if self.do_rel and m['rel'].sum() > 0:
-            train_data = state[train_state_idxs][..., m['rel']]
-            train_flat = train_data.reshape(-1, train_data.shape[-1])
-
-            mean = backend.nanmean(train_flat, dim=0) if is_torch else np.nanmean(train_flat, axis=0)
-            std = self._calc_std(train_flat, mean, backend, is_torch)
-
-            state[..., m['rel']] = state[..., m['rel']] / std
+            mean, std = _column_stats(state, train_state_idxs, m['rel'], is_torch)
+            _scale_columns_inplace(state, m['rel'], None, std)
             rel_stats_out = self._build_stats_dict(self.active_features['rel'], mean, std)
 
         # 3. Local Z-Score (per-sample std across bins — no global stats stored)
@@ -250,9 +303,9 @@ class StateNormalizer:
             self._apply_local_z_score(state, m['local_z'], is_torch)
 
         if self.fix_nans:
+            assert not np.isnan(self.sentinel_value), "sentinel_value must not be NaN"
             nan_mask = backend.isnan(state)
             state[nan_mask] = self.sentinel_value
-            assert state.isnan().sum() == 0, f"State contains nans"
 
         return state, z_stats_out, rel_stats_out, nan_mask
 
@@ -264,12 +317,12 @@ class StateNormalizer:
         # 1. Apply Z-Score
         if self.do_z and m['z'].sum() > 0:
             mean, std = self._extract_stats_arrays(z_stats_dict, self.active_features['z'], backend, state)
-            state[..., m['z']] = (state[..., m['z']] - mean) / std
+            _scale_columns_inplace(state, m['z'], mean, std)
 
         # 2. Apply Relative Norm
         if self.do_rel and m['rel'].sum() > 0:
             _, std = self._extract_stats_arrays(rel_stats_dict, self.active_features['rel'], backend, state)
-            state[..., m['rel']] = state[..., m['rel']] / std
+            _scale_columns_inplace(state, m['rel'], None, std)
 
         # 3. Local Z-Score (per-sample std across bins — no stored stats needed)
         if self.do_local_z and m['local_z'].sum() > 0:
@@ -277,8 +330,8 @@ class StateNormalizer:
 
         nan_mask = backend.isnan(state) if self.fix_nans else None
         if self.fix_nans:
+            assert not np.isnan(self.sentinel_value), "sentinel_value must not be NaN"
             state[nan_mask] = self.sentinel_value
-            assert backend.isnan(state).sum() == 0, "State contains nans"
         return state, nan_mask
 
     def _apply_stateless_norms(self, state, backend, m):
@@ -315,11 +368,11 @@ class StateNormalizer:
             return torch.clamp(torch.sqrt(var), min=1e-6)
         else:
             return np.clip(np.nanstd(flat_data, axis=0), a_min=1e-6, a_max=None)
-            
+
     def _build_stats_dict(self, active_features, mean_arr, std_arr):
         """Converts internal tensors/arrays to standard Python floats for JSON serialization."""
         return {
-            feat: {'mean': float(m), 'std': float(s)} 
+            feat: {'mean': float(m), 'std': float(s)}
             for feat, m, s in zip(active_features, mean_arr, std_arr)
         }
 
@@ -338,7 +391,7 @@ class StateNormalizer:
                 torch.tensor(stds, dtype=torch.float32, device=state.device)
             )
         return np.array(means, dtype=np.float32), np.array(stds, dtype=np.float32)
-    
+
     def inverse_transform(self, state, z_stats_dict=None, rel_stats_dict=None, nan_mask=None):
         """
         Reverses fit_transform / transform.
@@ -397,7 +450,7 @@ class StateNormalizer:
                 state[..., m['sin']] = torch.arcsin(torch.clamp(state[..., m['sin']], min=-1.0, max=1.0))
             else:
                 state[..., m['sin']] = np.arcsin(np.clip(state[..., m['sin']], -1.0, 1.0))
-        
+
 
     def inverse_transform_df(self, df, feature_names=None,
                             z_stats_dict=None, rel_stats_dict=None, drop_cyclical_components=False):
@@ -472,7 +525,7 @@ class StateNormalizer:
                 drop_cyclical_components=drop_cyclical_components)
 
         return df
-    
+
 def inverse_cyclical_norm(df, cyclical_feature_names, *,
                           target=None,
                           drop_cyclical_components=False,
@@ -504,7 +557,7 @@ def inverse_cyclical_norm(df, cyclical_feature_names, *,
 
             if drop_cyclical_components:
                 df.drop(columns=[col, sin_col], inplace=True)
-            
+
     return df
 
 def normalize_timestamp(timestamp, sunset_timestamp, sunrise_timestamp):

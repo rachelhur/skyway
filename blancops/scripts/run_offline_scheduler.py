@@ -5,11 +5,12 @@ multi-night forward-simulation ``OfflineBlancoEnv``, and runs the policy to
 generate an observing schedule. The first night's survey state can be seeded
 from a prior observing history via ``--obs_history_filename``.
 """
+import pandas as pd
 import numpy as np
 import gymnasium as gym
 
-from blancops.configs.constants import WORKSPACE
-from blancops.configs.rl_schema import ActionConstraints
+from blancops.configs.paths import OfflineRunPaths, RunPaths, workspace
+from blancops.configs.experiment_schema import ActionConstraints
 from blancops.rl.agent_factory import AgentFactory
 from blancops.rl.offline_runner import OfflineRunner
 from blancops.data.lookup_tables import LookupTables
@@ -18,7 +19,7 @@ from blancops.data.seeing_trajectory import extract_night_seeing_trajectory
 from blancops.utils.sys_utils import seed_everything
 from blancops.io.logger_utils import configure_logger
 from blancops.utils.sys_utils import get_system_device
-from blancops.environment.offline_env import OfflineBlancoEnv
+from blancops.environment.offline_env import OfflineBlancoEnv, resolve_observing_windows
 from blancops.environment.field_mask_schedule import FieldMaskSchedule
 
 import argparse
@@ -29,51 +30,67 @@ def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     # Model choice
-    parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1", help='Model alias or relative path to trained model directory')
-    parser.add_argument('-c', '--field_choice_method', type=str, default='interp', choices=['random', 'interp'], help="Field selection method within a chosen bin.")
+    parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1_nside32", help='Model alias or relative path to trained model directory')
 
-    # Field and Schedule info
-    parser.add_argument('--field_lookup_dir', type=Path, required=True, help='Relative path to field lookup dir')
-    parser.add_argument('-d', '--observing_nights', type=str, nargs='*', default=['2026-06-23-half2', '2026-06-24-half2'],
-                        help="List of observing nights. Format [YY-MM-DD-NIGHT, ...] (e.g. 2026-06-23-full)"
-                        )
+    # Fields
+    fields_src = parser.add_mutually_exclusive_group(required=True)
+    fields_src.add_argument('--fields', type=Path,
+                            help='Fields file (.csv or .json), one row per (field, filter): ra, dec, filter, count, '
+                                 'exptime; optional field_name, propid, priority. Lookups are built into <outdir>/lookups.')
+    fields_src.add_argument('--field_lookup_dir', type=Path, help='Existing lookup directory (e.g. <outdir>/lookups of an earlier run).')
+    parser.add_argument('--radians', action='store_true', help='ra/dec in --fields are in radians (default: degrees).')
     parser.add_argument('--obs_history_filename', type=str, default=None,
                         help='If provided, seed the first night from a prior observing history. '
                              'Accepts a schedule CSV (.csv) or a live observing log (.jsonl/.json).')
 
-    # Output info
+    # Observing time
+    parser.add_argument('-d', '--observing_nights', type=str, nargs='+', default=None,
+                        help="Observing nights to schedule, one window each. Format YYYY-MM-DD-NIGHT where "
+                             "NIGHT is one of 'full', 'half1', 'half2' (e.g. 2026-06-23-full). "
+                             "Cannot be combined with --start_time / --stop_time.")
+    parser.add_argument('--start_time', type=float, default=None,
+                        help="Unix timestamp at which a single observing window starts. Without "
+                             "--stop_time the window ends at that night's sunrise. The window must lie "
+                             "within one night, when the sun is below --sun_el_limit.")
+    parser.add_argument('--stop_time', type=float, default=None,
+                        help="Unix timestamp at which a single observing window stops. Without "
+                             "--start_time the window starts at that night's sunset.")
+
+    # Observing script output
     parser.add_argument('-o', '--outdir', type=Path, required=True, help='Relative path to output directory')
-    parser.add_argument('--schedule_prefix', type=str, default='schedule', help='Base filename prefix for the generated schedule output')
-    parser.add_argument('--save_sispi', action='store_true', help='Whether to save SISPI-format json files.')
+    parser.add_argument('--schedule_prefix', type=str, default='schedule',
+                        help='Base filename prefix for the generated schedule output')
+    parser.add_argument('-s', '--save_observing_script', action='store_true',
+                        help="Whether to save schedules as the telescope's observing script (SISPI JSON for Blanco).")
+    parser.add_argument('--propid', type=str, default=None,
+                        help='Proposal id written to observing scripts. Required with --save_observing_script.')
+    parser.add_argument('--proposer', type=str, default='ai-scheduler', help='Proposer written to observing scripts.')
+    parser.add_argument('--program', type=str, default=None,
+                        help='Program name written to observing scripts. Required with --save_observing_script.')
+    parser.add_argument('--save_state_features', action='store_true',
+                        help="Whether to save per-night glob/bin observation arrays as _obs.npz files.")
+
+    # Plotting
     parser.add_argument('--save_movie', action='store_true', help='Whether to save gif files.')
-    parser.add_argument('--save_mollweide', action='store_true', help='Whether to save png files.')
+    # parser.add_argument('--save_mollweide', action='store_true', help='Whether to save png files.') # XXX Broken for az/el
+    parser.add_argument('--plot_bins', action='store_true',
+                        help='Also draw HEALPix bins in movies of field-level models (bin-level models always draw them).')
 
     # Logging
     parser.add_argument('-l', '--logging_level', type=str, default='info', choices=['info', 'debug', 'warning', 'error'], help='Logging level.')
-    parser.add_argument('--overwrite', action='store_true', help='Whether to overwrite existing schedule if name already exists.')
+    parser.add_argument('--overwrite', action='store_true', help='Whether to overwrite existing schedule if already exists.')
     parser.add_argument('--seed', type=int, default=10, help='Random seed for schedule generation')
 
     # Scheduling parameters
-    parser.add_argument('--sun_el_limit', type=float, default=-12, help="How low below horizon sun needs to be for observing (in deg). Default is -12.")
-    parser.add_argument('--airmass_limit', type=float, default=1.8, help="The agent will only observe if there exist *any* fields below the airmass_lim")
+    parser.add_argument('--sun_el_limit', type=float, default=-12, help="Highest sun elevation (in deg) for observing. Default is -12.")
+    parser.add_argument('--airmass_limit', type=float, default=1.8,
+                        help="Only fields with airmass below this limit can be scheduled.")
     parser.add_argument('--initial_fwhm', type=float, default=0.9,
                         help="Assumed zenith delivered seeing (arcsec, r-band) for the forward sim, "
                              "projected per pointing by airmass/filter. Default 0.9 is the CTIO Blanco/DECam "
-                             "median. Only used when the model includes 'fwhm' as a global feature, and "
                              "ignored when --seeing_val_night is given.")
-    parser.add_argument('--val_seeing_cache', type=Path,
-                        default=WORKSPACE / 'deployable_models/bc_v1_max_feature_set/checkpoints/val_dataset_cache.pt',
-                        help="Path to a val_dataset_cache.pt holding the validation-night DataFrame, "
-                             "used with --seeing_val_night to replay a real night's measured seeing.")
-    parser.add_argument('--seeing_val_night', type=str, default=None,
-                        help="Validation night key (date string in the cache's 'night' column) whose "
-                             "measured seeing trajectory to replay each sim night. Overrides --initial_fwhm. "
-                             "Omit to use a constant --initial_fwhm.")
 
-    # Evaluation hyperparameters
-    parser.add_argument('--num_episodes', type=int, default=1, help='Number of evaluation episodes to run')
-
-    # Field masking (time-windowed field-id masks). Omit --mask_baseline_field_ids to disable.
+    # Field masking option (time-windowed field-id masks)
     parser.add_argument('--mask_baseline_field_ids', type=int, nargs='*', default=None,
                         help='Field ids masked outside any mask window (baseline). If omitted, no masking is applied.')
     parser.add_argument('--mask_baseline_mode', type=str, choices=['mask', 'keep_only'], default='mask',
@@ -85,19 +102,50 @@ def get_args():
     parser.add_argument('--mask_window_mode', type=str, choices=['mask', 'keep_only'], default='keep_only',
                         help="Window mask mode: 'keep_only' hides all field ids except these during the window.")
 
-    return parser.parse_args()
+    # Diagnostics/legacy
+    parser.add_argument('-c', '--field_choice_method', type=str, default='interp', choices=['random', 'interp'], help="Field selection method within a chosen bin.")
+    parser.add_argument('--action_decode', type=str, default='joint', choices=['joint', 'filter_first'], help="Bin/filter decode: 'joint' argmax, or 'filter_first' (choose filter over all visible bins, then best available bin).")
+    parser.add_argument('--dump_moonset_q', action='store_true', help="Print a one-shot per-filter Q breakdown at the first post-moonset step (diagnostic).")
+    parser.add_argument('--val_seeing_cache', type=Path,
+                        default=RunPaths(workspace().deployable_models / 'bc_v1_max_feature_set').dataset_cache('val'),
+                        help="Path to a val_dataset_cache.pt holding the validation-night DataFrame, "
+                             "used with --seeing_val_night to replay a real night's measured seeing.")
+    parser.add_argument('--downtime_csv', type=Path, default=None,
+                        help="CSV with columns start, end (unix timestamps) giving intervals "
+                             "in which the telescope was not observing. The replay idles "
+                             "through them instead of slewing straight on, so that a simulated "
+                             "night covers the same observing time a real one did.")
+    parser.add_argument('--reset_counts_on_exhaustion', action='store_true',
+                        help="When every reachable survey target is complete, zero the visit "
+                             "counts and keep observing instead of idling to the end of the "
+                             "night. Matches live operation, where the scheduler was restarted "
+                             "against a fresh history once it ran out.")
+    parser.add_argument('--seeing_trajectory_csv', type=Path, default=None,
+                        help="CSV with columns sec_since_sunset, fwhm (arcsec), band, el (rad) "
+                             "to replay as the night's measured seeing. Use for nights that are "
+                             "not in a validation cache, e.g. a deployment night scored from its "
+                             "own telemetry. Overrides --initial_fwhm and --seeing_val_night.")
+    parser.add_argument('--seeing_val_night', type=str, default=None,
+                        help="Validation night key (date string in the cache's 'night' column) whose "
+                             "measured seeing trajectory to replay each sim night. Overrides --initial_fwhm. "
+                             "Omit to use a constant --initial_fwhm.")
+
+    args = parser.parse_args()
+    if args.save_observing_script and not args.propid:
+        parser.error("--propid is required with --save_observing_script")
+    try:
+        args.observing_windows = resolve_observing_windows(
+            args.sun_el_limit, observing_nights=args.observing_nights,
+            start_time=args.start_time, stop_time=args.stop_time,
+        )
+    except ValueError as e:
+        parser.error(str(e))
+    return args
 
 
 def main():
     # Parse args
     args = get_args()
-
-    # ------------------------------
-    # LOAD TARGET FIELDS
-    # ------------------------------
-
-    lookup_dir = Path(args.field_lookup_dir)
-    lookups = LookupTables.load_from_dir(data_dir=lookup_dir)
 
     # ---------------------------------
     # SETUP LOGGER AND OUTDIR
@@ -112,17 +160,31 @@ def main():
         log_to_stdout=True,
         log_to_file=True,
         outdir=outdir,
-        filename='offline_schedule.log',
+        filename=OfflineRunPaths.LOG,
         use_tqdm=True
     )
 
-    logger.info("Arguments:")
+    logger.debug("Arguments:")
     for key, value in vars(args).items():
-        logger.info(
+        logger.debug(
             "\t" + f"{key}: {value}"
             )
 
     logger.info(f"Using {outdir} as output directory.")
+    logger.info(f"Using model {args.model_path_or_alias} on device {device}.")
+
+    # ------------------------------
+    # LOAD TARGET FIELDS
+    # ------------------------------
+    if args.fields is not None:
+        lookup_dir = OfflineRunPaths(outdir).lookups
+        logger.info(f"Building lookups from {args.fields} into {lookup_dir}")
+        lookups = LookupTables.build_lookups_from_fields(
+            fields_path=args.fields, outdir=lookup_dir, write_to_disk=True, radec_units='rad' if args.radians else 'deg',
+        )
+    else:
+        lookups = LookupTables.load_from_dir(data_dir=args.field_lookup_dir)
+    logger.info(f"Loaded {len(lookups.fields)} fields, {int(lookups.target_fidfilt_counts.sum())} target exposures.")
 
     # ---------------------------------
     # LOAD AGENT, MODEL, AND OFFLINE RUNNER
@@ -135,28 +197,24 @@ def main():
         lookups=lookups,
         field_choice_method=args.field_choice_method,
         device=device,
+        action_decode=args.action_decode,
     )
     runner = OfflineRunner(
         agent=agent, policy=agent.policy, cfg=model_cfg,
-        lookups=lookups, num_episodes=args.num_episodes, outdir=outdir,
-        save_SISPI=args.save_sispi, save_movie=args.save_movie,
-        save_mollweide=args.save_mollweide
+        lookups=lookups, telescope=lookups.survey.telescope,
+        outdir=outdir,
+        save_observing_script=args.save_observing_script, save_movie=args.save_movie,
+        observing_script_kwargs={'propid': args.propid, 'proposer': args.proposer, 'program': args.program},
+        save_mollweide=False, # args.save_mollweide,
+        plot_bins=args.plot_bins,
+        save_state_features=args.save_state_features,
+        dump_moonset_q=args.dump_moonset_q
     )
 
-    # ---------------------------------
-    # CREATE ENVIRONMENT
-    # ---------------------------------
-    logger.info("Setting up environment...")
-    env_name = 'OfflineBlanco-v0'
-    gym.register(
-        id=f"gymnasium_env/{env_name}",
-        entry_point=OfflineBlancoEnv,
-    )
 
-    # norm_stats come from the exact weights file loaded for the policy
-    # (returned by build_agent), so normalization always matches the policy.
-    zscore_stats = norm_stats.get('z_score', {})
-    rel_norm_stats = norm_stats.get('rel_norm', {})
+    # ---------------------------------
+    # DIAGNOSTICS / TESTING
+    # ---------------------------------
 
     # Seed the first night's survey state, either from a prior observing
     # history or from a cold start (no prior visits, OT clock at 0).
@@ -176,7 +234,10 @@ def main():
     # extracted trajectory (keyed by seconds-since-sunset) is saved to the run
     # outdir for provenance and re-aligned to each sim night inside the env.
     seeing_trajectory = None
-    if args.seeing_val_night is not None:
+    if args.seeing_trajectory_csv is not None:
+        logger.info(f"Replaying seeing trajectory from {args.seeing_trajectory_csv}")
+        seeing_trajectory = pd.read_csv(args.seeing_trajectory_csv)
+    elif args.seeing_val_night is not None:
         logger.info(
             f"Extracting seeing trajectory for night {args.seeing_val_night} from "
             f"{args.val_seeing_cache}"
@@ -200,21 +261,42 @@ def main():
         window_mode=args.mask_window_mode,
     )
 
+    downtime_windows = None
+    if args.downtime_csv is not None:
+        dt = pd.read_csv(args.downtime_csv)
+        downtime_windows = list(zip(dt["start"].astype(float),
+                                    dt["end"].astype(float)))
+        logger.info(f"Loaded {len(downtime_windows)} downtime intervals from "
+                    f"{args.downtime_csv}")
+
+
+    # ---------------------------------
+    # CREATE ENVIRONMENT
+    # ---------------------------------
+    logger.info("Setting up environment...")
+    env_name = 'OfflineBlanco-v0'
+    gym.register(
+        id=f"gymnasium_env/{env_name}",
+        entry_point=OfflineBlancoEnv,
+    )
+
     env = gym.make(
         id=f"gymnasium_env/{env_name}",
         cfg=model_cfg,
         constraints_cfg=ActionConstraints(sun_el_limit=args.sun_el_limit,
-                                          airmass_limit=args.airmass_limit),
+                                          airmass_limit=args.airmass_limit,
+                                          airmass_failsafe=args.airmass_limit), # extra failsafe for live scheduler
         lookups=lookups,
-        z_score_stats=zscore_stats,
-        rel_norm_stats=rel_norm_stats,
-        observing_night_strs=args.observing_nights,
+        norm_stats=norm_stats,
+        observing_windows=args.observing_windows,
         initial_counts=initial_counts,
         initial_last_visit_ot=initial_last_visit_ot,
         initial_ot_at_sunset=initial_ot_at_sunset,
         initial_fwhm=args.initial_fwhm,
         seeing_trajectory=seeing_trajectory,
+        downtime_windows=downtime_windows,
         field_mask_schedule=field_mask_schedule,
+        reset_counts_on_exhaustion=args.reset_counts_on_exhaustion,
     )
 
     # ---------------------------------

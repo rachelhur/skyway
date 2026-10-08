@@ -13,8 +13,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from abc import ABC, abstractmethod
-from blancops.configs.constants import IDX2FILTER
-from blancops.configs.rl_schema import ActionConstraints
+from blancops.configs.constants import WAIT_SIGNAL
+from blancops.configs.experiment_schema import ActionConstraints
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.environment.live_env import LiveBlancoEnv
 from blancops.ephemerides.time_utils import Clock
@@ -24,6 +24,7 @@ from blancops.data.lookup_tables import LookupTables
 from blancops.ephemerides.ephemerides import HealpixGrid
 from blancops.rl.agent_factory import AgentFactory
 from blancops.survey.profiles import DES
+from blancops.configs.enums import grid_is_azel
 
 logger = logging.getLogger(__name__)
 
@@ -218,11 +219,11 @@ class AIModelRunner(ModelRunner):
             sun_elevation_deg=sun_elevation_deg,
             seeing_window=seeing_window
         )
-        self.hpGrid = HealpixGrid(nside=self.cfg.data.nside, is_azel="azel" in self.cfg.data.action_space)
+        self.hpGrid = HealpixGrid(nside=self.cfg.data.nside, is_azel=grid_is_azel(self.cfg.data.action_space))
 
     def _build_agent(self, model_path_or_alias, field_choice_method):
         # Agent and Model
-        factory = AgentFactory() # Defaults to WORKSPACE / "deployable_models"
+        factory = AgentFactory() # Defaults to workspace().deployable_models
         self.agent, self.cfg, self.norm_stats = factory.build_agent(
             model_path_or_alias=model_path_or_alias,
             lookups=self.lookups,
@@ -232,14 +233,11 @@ class AIModelRunner(ModelRunner):
 
     def _build_env(self, telemetry_now, sun_elevation_deg, seeing_window):
         constraints_cfg = ActionConstraints(sun_el_limit=sun_elevation_deg) # Uses default constraints
-        zscore_stats = self.norm_stats.get('z_score', {})
-        rel_norm_stats = self.norm_stats.get('rel_norm', {})
         env = LiveBlancoEnv(
             cfg=self.cfg,
             constraints_cfg=constraints_cfg,
             lookups=self.lookups,
-            z_score_stats=zscore_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=self.norm_stats,
             telemetry_init=telemetry_now,
             seeing_window=seeing_window
         )
@@ -340,7 +338,7 @@ class AIModelRunner(ModelRunner):
         tel.setdefault('timestamp', ts)
         if tel.get('last_exposure', None) is not None:
             filt = tel['last_exposure'].get('filter')
-            tel['filter'] = filt if filt in IDX2FILTER.values() else 'g'
+            tel['filter'] = filt if filt in self.lookups.survey.filters else 'g'
 
         return tel
 
@@ -368,8 +366,11 @@ class AIModelRunner(ModelRunner):
         obs, info = init_obs, init_info
         for i in range(chunk_size):
             bin_idx, filter_idx, field_id = self.agent.choose_bin_filter_field(obs, info, self.hpGrid)
-            filter = IDX2FILTER[filter_idx]
-            actions = {'bin': np.int32(bin_idx), 'field_id': np.int32(field_id), 'filter_idx': np.int32(filter_idx)}
+            if bin_idx == WAIT_SIGNAL:
+                logger.info("[AIModelRunner] No observable field; ending the proposal chunk.")
+                break
+            filter = self.lookups.survey.idx2filter[filter_idx]
+            actions = self.agent.command_to_env_action(bin_idx, filter_idx, field_id)
 
             proposed_schedule['bin_idx'].append(bin_idx)
             proposed_schedule['field_id'].append(field_id)

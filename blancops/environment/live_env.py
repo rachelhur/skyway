@@ -27,9 +27,8 @@ from blancops.environment.seeing_model import PredictiveSeeingModel
 from blancops.environment.survey_tracker import SurveyProgressTracker
 from blancops.data.features.glob_features import get_night_boundaries
 from blancops.ephemerides import ephemerides
-from blancops.configs.constants import (
-    WAIT_SIGNAL, ZENITH_FILTER_IDX, FILTER2IDX, IDX2FILTER, FWHM_REF_FILTER,
-)
+from blancops.configs.constants import WAIT_SIGNAL, ZENITH_FILTER_IDX
+from blancops.survey.profiles import DES
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +46,12 @@ class LiveBlancoEnv(BaseBlancoEnv):
         cfg,
         constraints_cfg,
         lookups,
-        z_score_stats,
-        rel_norm_stats,
+        norm_stats,
         telemetry_init,
         survey_night_idx=0,
         telescope=None,
-        seeing_window=None
+        seeing_window=None,
+        survey=DES,
     ):
         self._survey_night_idx = survey_night_idx
 
@@ -65,9 +64,9 @@ class LiveBlancoEnv(BaseBlancoEnv):
             cfg=cfg,
             constraints_cfg=constraints_cfg,
             lookups=lookups,
-            z_score_stats=z_score_stats,
-            rel_norm_stats=rel_norm_stats,
+            norm_stats=norm_stats,
             telescope=telescope,
+            survey=survey,
         )
         self._build_priority_mask()
         # airmass_limit and sun_el_limit are stored on self by base.
@@ -77,7 +76,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
         # Rolling seeing predictor, fed by real telemetry readings on each
         # sync. Built before the first sync below so telemetry_init can seed
         # it. Cold start falls back to the nominal median in Seeing.predict.
-        if "fwhm" in self.global_feature_names:
+        if self._needs_seeing_model():
             if seeing_window:
                 cfg.data.seeing.window = seeing_window
             self._seeing_model = PredictiveSeeingModel(cfg.data.seeing)
@@ -106,7 +105,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
         """
         if telemetry is not None:
             filter_idx = telemetry.get(
-                "filter_idx", FILTER2IDX.get(telemetry.get("filter"), ZENITH_FILTER_IDX)
+                "filter_idx", self._survey.filter2idx.get(telemetry.get("filter"), ZENITH_FILTER_IDX)
             )
             snap = StateSnapshot(
                 timestamp=telemetry["timestamp"],
@@ -135,7 +134,8 @@ class LiveBlancoEnv(BaseBlancoEnv):
         ``sync_telemetry`` from real hardware telemetry.
         """
         field_id = int(obs_row["field_id"])
-        filter_idx = int(FILTER2IDX[obs_row["filter"]])
+        filter_idx = int(self._survey.filter2idx[obs_row["filter"]])
+        self._step_record = dict(field_id=field_id, filter_idx=filter_idx, t_start=float(self._ts))
         self._record_visit(field_id=field_id, filter_idx=filter_idx)
         self._field_id = field_id
         self._filter_idx = filter_idx
@@ -186,6 +186,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
             self._last_visit_ot.shape, np.nan, dtype=self._last_visit_ot.dtype
         )
 
+        filter2idx = self._survey.filter2idx
         for row in completed_obs.itertuples(index=False):
             field_id = int(row.field_id)
             if not 0 <= field_id < self.nfields:
@@ -196,7 +197,7 @@ class LiveBlancoEnv(BaseBlancoEnv):
                 continue
             ot = float(self._ot_at_sunset + (int(row.timestamp) - self._sunset_ts))
             if self.do_filt:
-                filter_idx = int(FILTER2IDX[row.filter])
+                filter_idx = int(filter2idx[row.filter])
                 counts[field_id, filter_idx] += 1
                 prev = last_visit_ot[field_id, filter_idx]
                 if np.isnan(prev) or ot > prev:
@@ -326,8 +327,8 @@ class LiveBlancoEnv(BaseBlancoEnv):
         """Refresh action masks and feature vectors after a state change."""
         self._update_action_masks()
         self._global_state = self._calculate_global_features()
-        if self.include_bin_features:
-            self._bin_state = self._calculate_bin_features()
+        if self.include_candidate_features:
+            self._candidate_state = self._calculate_candidate_features()
 
     # -----------------------------------------------------------------------
     # BaseBlancoEnv lifecycle hooks
@@ -355,11 +356,20 @@ class LiveBlancoEnv(BaseBlancoEnv):
             logger.info(f"Waited {(self._ts - old_ts) / 60:.1f} minutes")
             # Field/filter unchanged on wait; only bin_num updates below.
             # No visit accumulation — a wait is not an observation.
+            self._step_record = None
         else:
-            last_field_id = self._field_id
+            last_field_id, last_filter_idx = self._field_id, self._filter_idx
+            distance = self._slew_distance(last_field_id, field_id)
+            filter_change = last_filter_idx != ZENITH_FILTER_IDX and last_filter_idx != filter_idx
+            dead_time = self._get_dead_time(distance, filter_change)
             exptime = self._get_exposure_time(field_id=field_id, filter_idx=filter_idx)
-            slew_time = self._get_slew_time(last_field_id, field_id)
-            self._ts += exptime + slew_time
+
+            self._step_record = dict(
+                field_id=field_id, filter_idx=filter_idx, t_start=self._ts + dead_time,
+                dead_time=dead_time, filter_change=filter_change,
+            )
+            self._cache_step_reward_inputs(self._step_record)
+            self._ts += dead_time + exptime
 
             # _record_visit lives on BaseBlancoEnv and translates the
             # action's filter_idx to None automatically when the tracker
