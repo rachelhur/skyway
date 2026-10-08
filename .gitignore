@@ -36,3 +36,9 @@
 # Blancops heavy data 
 **/val_dataset_cache.pt
 /data/
+
+# Local scratchwork
+/scratch/
+
+# Local old saves just in case
+/old/
