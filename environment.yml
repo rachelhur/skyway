@@ -11,4 +11,5 @@ dependencies:
   - cartopy
   - healpy
   - fitsio
+  - psycopg2
   - pip
