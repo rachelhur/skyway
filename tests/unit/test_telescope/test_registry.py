@@ -1,10 +1,10 @@
 import pytest
 
-from blancops.telescope import get_telescope, list_telescopes
+from skyway.telescope import get_telescope, list_telescopes
 
 
 def test_all_keys_resolve():
-    assert set(list_telescopes()) == {"blanco", "blanco_decat", "rubin", "rubin_sim"}
+    assert set(list_telescopes()) == {"blanco"}
 
 
 def test_blanco_site_is_ctio():

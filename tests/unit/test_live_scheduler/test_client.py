@@ -1,14 +1,14 @@
 import unittest
 from unittest.mock import patch
 import json
-from blancops.math import units
+from skyway.math import units
 
-from blancops.live_scheduler.client import BlancoSCLTelescopeClient
+from skyway.live_scheduler.client import BlancoSCLTelescopeClient
 
 class TestBlancoSCLTelescopeClient(unittest.TestCase):
 
     # @patch intercepts the SCL import inside your client file
-    @patch('blancops.live_scheduler.client.SCL')
+    @patch('skyway.live_scheduler.client.SCL')
     def setUp(self, MockSCL):
         """This runs before every single test."""
         

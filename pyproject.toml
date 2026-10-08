@@ -4,7 +4,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "blancops"
+name = "skyway"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -30,22 +30,22 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["blancops*"]
+include = ["skyway*"]
 
 [project.scripts]
-build-train-lookups = "blancops.scripts.build_train_lookups:main"
-run-train = "blancops.scripts.train:main"
-run-eval = "blancops.scripts.evaluate:main"
-run-model-compare = "blancops.scripts.compare_models:main"
-run-offline-scheduler = "blancops.scripts.run_offline_scheduler:main"
-run-live-scheduler = "blancops.scripts.run_live_scheduler:main"
-run-explain = "blancops.scripts.run_explain:main"
-precompute-train-features = "blancops.scripts.precompute_features:main"
+build-train-lookups = "skyway.scripts.build_train_lookups:main"
+run-train = "skyway.scripts.train:main"
+run-eval = "skyway.scripts.evaluate:main"
+run-model-compare = "skyway.scripts.compare_models:main"
+run-offline-scheduler = "skyway.scripts.run_offline_scheduler:main"
+run-live-scheduler = "skyway.scripts.run_live_scheduler:main"
+run-explain = "skyway.scripts.run_explain:main"
+precompute-train-features = "skyway.scripts.precompute_features:main"
 
 [tool.setuptools.package-data]
-"blancops" = ["configs/*.json", "configs/*.yaml", "configs/templates/*.yaml", "blanco/*.conf",
+"skyway" = ["configs/*.json", "configs/*.yaml", "configs/templates/*.yaml", "blanco/*.conf",
               "models/aliases.yml", "models/*/configs/*.yaml", "models/*/checkpoints/model.pt"]
-"blancops.configs" = ["*.json"]
+"skyway.configs" = ["*.json"]
 
 [tool.pytest.ini_options]
 markers = ["slow: end-to-end tests that load a deployable model and roll out a night (deselect with -m 'not slow')"]

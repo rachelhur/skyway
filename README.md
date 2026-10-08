@@ -6,15 +6,15 @@ This repo contains a reinforcement-learning based autonomous scheduling agent fo
 
 ```bash
 conda env create -f environment.yml
-conda activate blancops
+conda activate skyway
 pip install -e .
 ```
 
-For instructions on training and evaluating policies, see the [training and evaluating documentation](./blancops/rl/README.md).
+For instructions on training and evaluating policies, see the [training and evaluating documentation](./skyway/rl/README.md).
 
 For instructions on creating offline schedules for future nights, see [below](#creating-offline-pre-generated-schedules-for-the-blanco-4-m-telescope).
 
-For instructions on deploying the real-time observation scheduling agent, see the [live scheduler documentation](./blancops/live_scheduler/README.md).
+For instructions on deploying the real-time observation scheduling agent, see the [live scheduler documentation](./skyway/live_scheduler/README.md).
 
 # Creating offline (pre-generated) schedules for the Blanco 4-m Telescope
 

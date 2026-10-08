@@ -1,0 +1,5 @@
+# Models shipped with the package: alias -> folder in skyway/models/.
+# Each folder holds only the inference files: configs/resolved_config.yaml and checkpoints/model.pt.
+bc_v1_nside32: bc_v1_nside32_max_feature_set # bin-level behavior cloning, nside=32
+bc_field: bc_field_v0.1 # field-level behavior cloning (trained as bc_field_v1.1/run_20261008_094646)
+cql_field: cql_field_v0.1 # field-level CQL (trained as cql_field_v1.1/run_20260929_192237)

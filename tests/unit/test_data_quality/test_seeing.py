@@ -2,9 +2,9 @@ import unittest
 from importlib import util
 from pathlib import Path
 import pandas as pd
-from blancops.math import units
-from blancops.data_quality.seeing import Seeing, convert_seeing
-from blancops.ephemerides.time_utils import standardize_time
+from skyway.math import units
+from skyway.data_quality.seeing import Seeing, convert_seeing
+from skyway.ephemerides.time_utils import standardize_time
 
 
 class TestSeeing(unittest.TestCase):

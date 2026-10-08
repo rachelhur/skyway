@@ -1,0 +1,73 @@
+# Behavior cloning (BC) template. Copy, then edit experiment_name and parent_dir.
+# Schema: skyway/configs/experiment_schema.py :: ExperimentConfig
+experiment_name: bc_template
+parent_dir: experiments/bc          # runs are written to <parent_dir>/<experiment_name>/run_<timestamp>
+
+data:
+  nside: 16                         # HEALPix resolution of the action bins
+  action_space: azel_filter         # azel_filter | radec_filter | azel | radec
+  val_frac: 0.1                     # or val_nights: [YYYY-MM-DD, ...]
+  test_frac: 0.1                    # or test_nights: [YYYY-MM-DD, ...]
+  # start_date: 2013-08-30
+  # end_date: 2019-02-10
+  global_features:
+    - t_night
+    - moon_phase
+    - moon_distance
+    - airmass
+    - ha
+    - lst
+    - el
+    - az
+    - sun_ra
+    - sun_dec
+    - sun_az
+    - sun_el
+    - moon_ra
+    - moon_dec
+    - moon_az
+    - moon_el
+    - is_filter
+    - sky_brightness
+    - global_mean_tiling
+    - fwhm
+  bin_features:
+    - moon_distance
+    - airmass
+    - el
+    - delta_az
+    - delta_el
+    - pointing_distance
+    - rel_ha
+    - rel_moon_distance
+    - rel_t_since_last_visit
+    - rel_min_tiling
+    - rel_num_unvisited_fields
+    - rel_num_incomplete_fields
+    - t_until_set
+
+model:
+  algorithm: bc
+  network: contextual_score_mlp     # contextual_score_mlp | dual_stream_mlp | mlp | autoregressive
+  loss_strategy: pure_joint         # pure_joint | hybrid_marginal | pseudo_ar | autoregressive
+  loss_function: cross_entropy      # cross_entropy | focal_loss | focal_loss_filter | focal_loss_slew
+  hidden_dim: 128
+  nlayers: 3
+  activation: leaky_relu            # relu | leaky_relu | gelu | swish | mish | tanh | sigmoid
+
+train:
+  checkpoint_metric: ang_sep        # accuracy | ang_sep | val_loss
+  max_epochs: 50
+  batch_size: 1024
+  lr_init: 1.0e-3
+  lr_final: 1.0e-6
+  lr_scheduler: cosine_annealing
+  lr_sched_epoch_start: 10
+  lr_sched_epoch_duration: 30       # lr_sched_epoch_start + lr_sched_epoch_duration <= max_epochs
+  patience: 10
+  save_every_n_epochs: 3            # keep weights every N epochs in addition to the top-k; 0 disables
+  num_workers: 0
+  device: cuda
+  seed: 42
+
+device: cuda

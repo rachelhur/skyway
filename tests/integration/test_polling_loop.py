@@ -3,9 +3,9 @@ from unittest.mock import patch, MagicMock
 import json
 import pandas as pd
 
-from blancops.live_scheduler.orchestrator import SchedulerOrchestrator
-from blancops.live_scheduler.client import BlancoSCLTelescopeClient
-from blancops.live_scheduler.model_runner import MockModelRunner
+from skyway.live_scheduler.orchestrator import SchedulerOrchestrator
+from skyway.live_scheduler.client import BlancoSCLTelescopeClient
+from skyway.live_scheduler.model_runner import MockModelRunner
 
 
 class SCLServerSimulation:
@@ -44,7 +44,7 @@ class SCLServerSimulation:
 
 class TestOrchestratorPollingLoop(unittest.TestCase):
 
-    @patch('blancops.live_scheduler.client.SCL')
+    @patch('skyway.live_scheduler.client.SCL')
     @patch('time.sleep')
     def test_polling_and_rejection_loop(self, mock_sleep, MockSCL):
         """

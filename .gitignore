@@ -33,7 +33,7 @@
 # Testing
 /.pytest_cache/
 
-# Blancops heavy data 
+# Skyway heavy data 
 **/val_dataset_cache.pt
 /data/
 

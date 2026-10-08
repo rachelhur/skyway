@@ -11,10 +11,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from blancops.data.lookup_tables import LookupTables
-from blancops.math import units
-from blancops.survey.profiles import DES
-from blancops.telescope.blanco import BLANCO, write_sispi
+from skyway.data.lookup_tables import LookupTables
+from skyway.math import units
+from skyway.survey.profiles import DES
+from skyway.telescope.blanco import BLANCO, write_sispi
 
 REFERENCE = json.loads((Path(__file__).parent / "reference_sispi.json").read_text())
 

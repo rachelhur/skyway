@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from dateutil.parser import UnknownTimezoneWarning
 
-from blancops.ephemerides.time_utils import standardize_time
+from skyway.ephemerides.time_utils import standardize_time
 
 TS = 1793755800.0  # 2026-11-04 01:30 UTC = 2026-11-03 22:30 at CTIO (UTC-3)
 

@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from blancops.data.lookup_tables import LookupTables
-from blancops.survey.profiles import DES
+from skyway.data.lookup_tables import LookupTables
+from skyway.survey.profiles import DES
 
 G, R, Z = (DES.filter2idx[f] for f in "grz")
 
