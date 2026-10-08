@@ -210,18 +210,10 @@ def main():
         dump_moonset_q=args.dump_moonset_q
     )
 
-    # ---------------------------------
-    # CREATE ENVIRONMENT
-    # ---------------------------------
-    logger.info("Setting up environment...")
-    env_name = 'OfflineBlanco-v0'
-    gym.register(
-        id=f"gymnasium_env/{env_name}",
-        entry_point=OfflineBlancoEnv,
-    )
 
-    # norm_stats come from the exact weights file loaded for the policy
-    # (returned by build_agent), so normalization always matches the policy.
+    # ---------------------------------
+    # DIAGNOSTICS / TESTING
+    # ---------------------------------
 
     # Seed the first night's survey state, either from a prior observing
     # history or from a cold start (no prior visits, OT clock at 0).
@@ -275,6 +267,17 @@ def main():
                                     dt["end"].astype(float)))
         logger.info(f"Loaded {len(downtime_windows)} downtime intervals from "
                     f"{args.downtime_csv}")
+
+
+    # ---------------------------------
+    # CREATE ENVIRONMENT
+    # ---------------------------------
+    logger.info("Setting up environment...")
+    env_name = 'OfflineBlanco-v0'
+    gym.register(
+        id=f"gymnasium_env/{env_name}",
+        entry_point=OfflineBlancoEnv,
+    )
 
     env = gym.make(
         id=f"gymnasium_env/{env_name}",
