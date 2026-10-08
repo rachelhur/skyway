@@ -30,7 +30,7 @@ def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     # Model choice
-    parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1", help='Model alias or relative path to trained model directory')
+    parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1_nside32", help='Model alias or relative path to trained model directory')
 
     # Fields
     fields_src = parser.add_mutually_exclusive_group(required=True)
@@ -72,7 +72,7 @@ def get_args():
 
     # Plotting
     parser.add_argument('--save_movie', action='store_true', help='Whether to save gif files.')
-    parser.add_argument('--save_mollweide', action='store_true', help='Whether to save png files.')
+    # parser.add_argument('--save_mollweide', action='store_true', help='Whether to save png files.') # XXX Broken for az/el
     parser.add_argument('--plot_bins', action='store_true',
                         help='Also draw HEALPix bins in movies of field-level models (bin-level models always draw them).')
 
@@ -90,7 +90,7 @@ def get_args():
                              "projected per pointing by airmass/filter. Default 0.9 is the CTIO Blanco/DECam "
                              "ignored when --seeing_val_night is given.")
 
-    # Field masking (time-windowed field-id masks). Omit --mask_baseline_field_ids to disable.
+    # Field masking option (time-windowed field-id masks)
     parser.add_argument('--mask_baseline_field_ids', type=int, nargs='*', default=None,
                         help='Field ids masked outside any mask window (baseline). If omitted, no masking is applied.')
     parser.add_argument('--mask_baseline_mode', type=str, choices=['mask', 'keep_only'], default='mask',
@@ -164,9 +164,9 @@ def main():
         use_tqdm=True
     )
 
-    logger.info("Arguments:")
+    logger.debug("Arguments:")
     for key, value in vars(args).items():
-        logger.info(
+        logger.debug(
             "\t" + f"{key}: {value}"
             )
 
@@ -204,7 +204,7 @@ def main():
         outdir=outdir,
         save_observing_script=args.save_observing_script, save_movie=args.save_movie,
         observing_script_kwargs={'propid': args.propid, 'proposer': args.proposer, 'program': args.program},
-        save_mollweide=args.save_mollweide,
+        save_mollweide=False, # args.save_mollweide,
         plot_bins=args.plot_bins,
         save_state_features=args.save_state_features,
         dump_moonset_q=args.dump_moonset_q
