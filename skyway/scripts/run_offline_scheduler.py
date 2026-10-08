@@ -2,8 +2,7 @@
 
 Builds the agent/policy from a trained or deployable model, constructs a
 multi-night forward-simulation ``OfflineBlancoEnv``, and runs the policy to
-generate an observing schedule. The first night's survey state can be seeded
-from a prior observing history via ``--obs_history_filename``.
+generate an observing schedule.
 """
 import pandas as pd
 import numpy as np
@@ -32,7 +31,8 @@ def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     # Model choice
-    parser.add_argument('-m', '--model_path_or_alias', type=str, default="cql_field", help='Model alias or relative path to trained model directory')
+    parser.add_argument('-m', '--model_path_or_alias', type=str, default="cql_field",
+                        help="Model alias or relative path to trained model directory. Options include 'cql_field', 'bc_field', 'bc_v1_nside32'")
 
     # Fields
     fields_src = parser.add_mutually_exclusive_group(required=True)
@@ -82,7 +82,7 @@ def get_args():
     parser.add_argument('-f', '--overwrite', action='store_true',
                         help='Delete results of an earlier run in --outdir (nights/, observing_scripts/, plots/, '
                              'rollout_info.pkl) before writing. Without it, an --outdir holding results is refused.')
-    parser.add_argument('--seed', type=int, default=10, help='Random seed for schedule generation')
+    parser.add_argument('--seed', type=int, default=10, help='Random seed.')
 
     # Scheduling parameters
     parser.add_argument('--sun_el_limit', type=float, default=-12, help="Highest sun elevation (in deg) for observing. Default is -12.")

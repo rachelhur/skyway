@@ -1,0 +1,15 @@
+# Conda environment for skyway. Packages with compiled dependencies come from conda-forge;
+# `pip install -e .` then installs the rest from pyproject.toml.
+#   conda env create -f environment.yml
+#   conda activate skyway
+#   pip install -e .
+name: skyway
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - cartopy
+  - healpy
+  - fitsio
+  - psycopg2
+  - pip
