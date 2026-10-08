@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 import json
+import pandas as pd
 from skyway.math import units
 
 from skyway.live_scheduler.client import BlancoSCLTelescopeClient
@@ -8,10 +9,17 @@ from skyway.live_scheduler.client import BlancoSCLTelescopeClient
 class TestBlancoSCLTelescopeClient(unittest.TestCase):
 
     # @patch intercepts the SCL import inside your client file
+    @patch('skyway.live_scheduler.client.DatabaseSeeing')
+    @patch('skyway.live_scheduler.client.ephemerides.equatorial_to_topographic',
+           return_value=(0.0, -30 * units.deg))
     @patch('skyway.live_scheduler.client.SCL')
-    def setUp(self, MockSCL):
+    def setUp(self, MockSCL, mock_sun_altaz, MockSeeing):
         """This runs before every single test."""
-        
+
+        # empty seeing history instead of the DES database
+        MockSeeing.return_value.update.return_value = False
+        MockSeeing.return_value.raw = pd.DataFrame()
+
         # grab a reference to the dummy SCL instance
         self.mock_scl_instance = MockSCL.return_value
         
