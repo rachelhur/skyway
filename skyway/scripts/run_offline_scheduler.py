@@ -32,8 +32,7 @@ def get_args():
 
     # Model choice
     parser.add_argument('-m', '--model_path_or_alias', type=str, default="cql_field",
-                        help='Model alias or relative path to trained model directory',
-                        choices=['cql_field', 'bc_field', 'bc_v1_nside32'])
+                        help="Model alias or relative path to trained model directory. Options include 'cql_field', 'bc_field', 'bc_v1_nside32'")
 
     # Fields
     fields_src = parser.add_mutually_exclusive_group(required=True)
