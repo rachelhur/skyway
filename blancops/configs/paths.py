@@ -355,6 +355,11 @@ class OfflineRunPaths:
         object.__setattr__(self, "root", Path(self.root))
 
     @property
+    def lookups(self) -> Path:
+        """Lookup tables built from a fields file for this run."""
+        return self.root / "lookups"
+
+    @property
     def nights(self) -> Path:
         """Per-night schedule CSVs (and optional observation arrays)."""
         return self.root / "nights"

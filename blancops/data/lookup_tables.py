@@ -223,6 +223,82 @@ class LookupTables:
         return exptime_matrix
 
     @staticmethod
+    def _read_fields_file(fields_path: Path) -> pd.DataFrame:
+        """Read a fields file by extension: .csv or .json (records).
+
+        Parameters
+        ----------
+        fields_path : Path
+            Fields file.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per (field, filter) entry.
+        """
+        suffix = fields_path.suffix.lower()
+        if suffix == ".csv":
+            return pd.read_csv(fields_path)
+        if suffix == ".json":
+            return pd.read_json(fields_path)
+        raise ValueError(f"Unsupported fields file type {suffix!r} for {fields_path}; expected .csv or .json.")
+
+    @staticmethod
+    def _radec_to_radians(df: pd.DataFrame, radec_units: str) -> pd.DataFrame:
+        """Check RA/Dec ranges and return them in radians, with RA wrapped to [0, 2 pi).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Fields with `ra` and `dec` columns.
+        radec_units : str
+            'deg' or 'rad'.
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy with `ra`, `dec` in radians.
+        """
+        df = df.copy()
+        if radec_units == "deg":
+            if (df["dec"].abs() > 90).any():
+                raise ValueError("Dec outside [-90, 90] degrees; check the fields file units.")
+            if (df["ra"].abs() <= 2 * np.pi).all() and (df["dec"].abs() <= np.pi / 2).all():
+                logger.warning("Every RA/Dec fits the radian range; if the fields are in radians, pass radec_units='rad'.")
+            df["ra"] = np.radians(df["ra"] % 360.0)
+            df["dec"] = np.radians(df["dec"])
+        elif radec_units == "rad":
+            if (df["ra"].abs() > 2 * np.pi).any() or (df["dec"].abs() > np.pi / 2).any():
+                raise ValueError(
+                    "|RA| above 2 pi or |Dec| above pi/2 radians; "
+                    "the fields file may be in degrees (use radec_units='deg')."
+                )
+            df["ra"] = df["ra"] % (2 * np.pi)
+        else:
+            raise ValueError(f"radec_units must be 'deg' or 'rad', got {radec_units!r}.")
+        return df
+
+    @staticmethod
+    def _validate_targets(df: pd.DataFrame) -> None:
+        """Raise unless every (field, filter) row is listed once with a positive count and exptime.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Fields with `field_id`, `field`, `filter`, `count`, `exptime` columns.
+        """
+        dup = df.duplicated(subset=["field_id", "filter"], keep=False)
+        if dup.any():
+            pairs = sorted(set(zip(df.loc[dup, "field"], df.loc[dup, "filter"])))
+            raise ValueError(f"(field, filter) pairs listed more than once: {pairs}")
+        for col in ("count", "exptime"):
+            values = pd.to_numeric(df[col], errors="coerce")
+            bad = values.isna() | (values <= 0)
+            if bad.any():
+                pairs = list(zip(df.loc[bad, "field"], df.loc[bad, "filter"], df.loc[bad, col]))
+                raise ValueError(f"Column {col!r} must be a positive number; bad (field, filter, {col}) rows: {pairs}")
+
+    @staticmethod
     def _validate_field_ids(df):
         """
         Validates that field_id cleanly maps 1:1 with unique (ra, dec) pairs.
@@ -253,7 +329,7 @@ class LookupTables:
                 f"multiple distinct (ra, dec) coordinate pairs."
             )
 
-        print("Data Check Passed: field_id uniquely maps 1:1 to all (ra, dec) pairs.")
+        logger.info("field_id uniquely maps 1:1 to all (ra, dec) pairs.")
         return True
 
     @staticmethod
@@ -321,8 +397,35 @@ class LookupTables:
         outdir: Optional[Path] = None,
         write_to_disk: bool = False,
         survey: SurveyProfile = DES,
+        radec_units: str = "rad",
     ) -> "LookupTables":
-        """Build a LookupTables from a JSON fields file."""
+        """Build a LookupTables from a fields table: one row per (field, filter) to observe.
+
+        Required columns (case-insensitive): `ra`, `dec`, `filter` (one of the survey's filters),
+        `count` (target number of exposures, > 0), `exptime` (seconds, > 0). Optional: `field_name`
+        (or `fieldname`; default `field_<n>`), `propid`, `priority`, `field_id` (0..N-1, one per
+        (ra, dec)). Fields are identified by (ra, dec); field_id follows first appearance.
+
+        Parameters
+        ----------
+        fields_df : pd.DataFrame, optional
+            Fields table.
+        fields_path : str or Path, optional
+            Fields file (.csv or .json records), used when `fields_df` is None.
+        outdir : Path, optional
+            Lookup directory; required when `write_to_disk`.
+        write_to_disk : bool, optional
+            Write the lookup files to `outdir`.
+        survey : SurveyProfile, optional
+            Survey whose filters order the per-filter matrices.
+        radec_units : str, optional
+            Units of `ra`/`dec` in the input: 'rad' or 'deg'.
+
+        Returns
+        -------
+        LookupTables
+            Lookups with ra/dec in radians.
+        """
         # Data and arg checks -------------------------------------------------
         if write_to_disk and outdir is None:
             raise ValueError("Must specify `outdir` if `write_to_disk` is True")
@@ -334,7 +437,7 @@ class LookupTables:
             df = fields_df.copy()
         else:
             fields_path = Path(fields_path)
-            df = pd.read_json(fields_path)
+            df = cls._read_fields_file(fields_path)
 
         # Ensure all columns are lowercase ---------------------------------
         df.columns = df.columns.str.lower()
@@ -345,12 +448,8 @@ class LookupTables:
         if missing:
             raise ValueError(f"Missing columns: {missing}")
 
-        # Check RA/Dec values are in radians --------------------------------
-        if (df["ra"] > 2 * np.pi).any() or (df["dec"].abs() > np.pi / 2).any():
-            raise ValueError(
-                "Data Check Failed: At least one RA/Dec values degrees exceed 2pi); "
-                "please convert to radians before building lookups."
-            )
+        # RA/Dec to radians ------------------------------------------------
+        df = cls._radec_to_radians(df, radec_units)
 
         # Resolve name column from common aliases ---------------------------
         if "field_name" in df.columns:
@@ -372,7 +471,8 @@ class LookupTables:
         df["filter_idx"] = df["filter"].map(survey.filter2idx).fillna(-1).astype(int)
         if (df["filter_idx"] == -1).any():
             bad = df.loc[df["filter_idx"] == -1, "filter"].unique()
-            raise ValueError(f"Unknown filter(s): {list(bad)}")
+            raise ValueError(f"Unknown filter(s) {list(bad)}; survey filters are {list(survey.filters)}.")
+        cls._validate_targets(df)
 
         # Validate per-field columns
         per_field_cols = ["field", "ra", "dec"]

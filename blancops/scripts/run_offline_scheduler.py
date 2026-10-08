@@ -33,13 +33,17 @@ def get_args():
     parser.add_argument('-m', '--model_path_or_alias', type=str, default="bc_v1", help='Model alias or relative path to trained model directory')
 
     # Fields
-    parser.add_argument('--field_lookup_dir', type=Path, required=True, help='Relative path to field lookup directory')
+    fields_src = parser.add_mutually_exclusive_group(required=True)
+    fields_src.add_argument('--fields', type=Path,
+                            help='Fields file (.csv or .json), one row per (field, filter): ra, dec, filter, count, '
+                                 'exptime; optional field_name, propid, priority. Lookups are built into <outdir>/lookups.')
+    fields_src.add_argument('--field_lookup_dir', type=Path, help='Existing lookup directory (e.g. <outdir>/lookups of an earlier run).')
+    parser.add_argument('--radians', action='store_true', help='ra/dec in --fields are in radians (default: degrees).')
     parser.add_argument('--obs_history_filename', type=str, default=None,
                         help='If provided, seed the first night from a prior observing history. '
                              'Accepts a schedule CSV (.csv) or a live observing log (.jsonl/.json).')
 
-    # Observing time: either whole nights (--observing_nights) or one exact window
-    # (--start_time / --stop_time), not both.
+    # Observing time
     parser.add_argument('-d', '--observing_nights', type=str, nargs='+', default=None,
                         help="Observing nights to schedule, one window each. Format YYYY-MM-DD-NIGHT where "
                              "NIGHT is one of 'full', 'half1', 'half2' (e.g. 2026-06-23-full). "
@@ -52,7 +56,7 @@ def get_args():
                         help="Unix timestamp at which a single observing window stops. Without "
                              "--start_time the window starts at that night's sunset.")
 
-    # Output
+    # Observing script output
     parser.add_argument('-o', '--outdir', type=Path, required=True, help='Relative path to output directory')
     parser.add_argument('--schedule_prefix', type=str, default='schedule',
                         help='Base filename prefix for the generated schedule output')
@@ -143,13 +147,6 @@ def main():
     # Parse args
     args = get_args()
 
-    # ------------------------------
-    # LOAD TARGET FIELDS
-    # ------------------------------
-
-    lookup_dir = Path(args.field_lookup_dir)
-    lookups = LookupTables.load_from_dir(data_dir=lookup_dir)
-
     # ---------------------------------
     # SETUP LOGGER AND OUTDIR
     # ---------------------------------
@@ -174,6 +171,19 @@ def main():
             )
 
     logger.info(f"Using {outdir} as output directory.")
+
+    # ------------------------------
+    # LOAD TARGET FIELDS
+    # ------------------------------
+    if args.fields is not None:
+        lookup_dir = OfflineRunPaths(outdir).lookups
+        logger.info(f"Building lookups from {args.fields} into {lookup_dir}")
+        lookups = LookupTables.build_lookups_from_fields(
+            fields_path=args.fields, outdir=lookup_dir, write_to_disk=True, radec_units='rad' if args.radians else 'deg',
+        )
+    else:
+        lookups = LookupTables.load_from_dir(data_dir=args.field_lookup_dir)
+    logger.info(f"Loaded {len(lookups.fields)} fields, {int(lookups.target_fidfilt_counts.sum())} target exposures.")
 
     # ---------------------------------
     # LOAD AGENT, MODEL, AND OFFLINE RUNNER

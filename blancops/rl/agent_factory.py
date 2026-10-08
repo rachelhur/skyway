@@ -39,13 +39,7 @@ class AgentFactory:
         action_decode: str = 'joint'
     ) -> Tuple[Agent, ExperimentConfig, NormStats | None]:
 
-        # If model_path_or_alias is an absolute path or a path that exists, prefer that
-        if isinstance(model_path_or_alias, str) and Path(model_path_or_alias).is_absolute() and Path(model_path_or_alias).exists():
-            model_dir = Path(model_path_or_alias)
-        elif isinstance(model_path_or_alias, Path) and model_path_or_alias.exists():
-            model_dir = model_path_or_alias
-        else:
-            model_dir = self.resolve_model_dir(model_path_or_alias)
+        model_dir = self.resolve_model_dir(model_path_or_alias)
 
         config_path = model_dir / RunPaths.RESOLVED_CONFIG
         if not config_path.exists():
@@ -143,10 +137,31 @@ class AgentFactory:
                 return yaml.safe_load(f) or {}
         return {}
 
-    def resolve_model_dir(self, model_path_or_alias: str) -> Path:
-        target_directory_name = self.aliases.get(model_path_or_alias, model_path_or_alias)
-        model_path = self.base_dir / target_directory_name
+    def resolve_model_dir(self, model_path_or_alias: str | Path) -> Path:
+        """Model run directory for an alias, a run directory path, or a directory name under `base_dir`.
 
-        if not model_path.is_dir():
-            raise FileNotFoundError(f"Resolved model directory not found: {model_path}")
-        return model_path
+        Order: alias in `aliases.yml` (-> base_dir/<target>), existing directory path (relative or
+        absolute), then base_dir/<name>.
+
+        Parameters
+        ----------
+        model_path_or_alias : str or Path
+            Alias, run directory path, or directory name under `base_dir`.
+
+        Returns
+        -------
+        Path
+            Existing model run directory.
+        """
+        key = str(model_path_or_alias)
+        if key in self.aliases:
+            candidates = [self.base_dir / self.aliases[key]]
+        else:
+            candidates = [Path(key).expanduser(), self.base_dir / key]
+        for path in candidates:
+            if path.is_dir():
+                return path.resolve()
+        raise FileNotFoundError(
+            f"Model {key!r} not found; looked for {[str(p) for p in candidates]}. "
+            f"Aliases in {self.alias_file}: {sorted(self.aliases)}"
+        )

@@ -10,6 +10,7 @@ import pickle
 from pathlib import Path
 
 from blancops.ephemerides import ephemerides
+from blancops.ephemerides.time_utils import unix_to_datetime
 from blancops.configs.constants import *
 import logging
 
@@ -260,7 +261,8 @@ class OfflineRunner:
                 action_mask = info.get('action_mask', None)
 
                 if not action_mask.any():
-                    logger.warning(f"No valid fields available at step {i} (mask is all zeros).")
+                    if last_bin_idx != WAIT_SIGNAL:
+                        logger.warning(f"No observable, incomplete field at {unix_to_datetime(info['timestamp'])}; waiting.")
                     bin_idx = WAIT_SIGNAL
                 else:
                     bin_idx, filter_idx, field_id = self.agent.choose_bin_filter_field(obs, info, hpGrid, epsilon=None)
@@ -353,8 +355,12 @@ class OfflineRunner:
 
         Avoids OOM."""
         csv_path = self._flush_night_csv(rows, night_label)
-        if csv_path is not None:
+        if csv_path is None:
+            logger.warning(f"Night {night_label}: no exposures scheduled (no field was observable and incomplete); "
+                           f"no schedule files written for this night.")
+        else:
             night_df = read_schedule_csv(csv_path)
+            logger.info(f"Night {night_label}: {len(night_df)} exposures scheduled.")
             if self.save_observing_script:
                 self._write_observing_script(night_df, night_label)
             if self.save_movie:
