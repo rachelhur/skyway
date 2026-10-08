@@ -12,16 +12,19 @@ dependencies = ["PyYAML"]
 include = ["blancops*"]
 
 [project.scripts]
-workspace-init = "blancops.scripts.init:main"
 build-train-lookups = "blancops.scripts.build_train_lookups:main"
 run-train = "blancops.scripts.train:main"
-run-evaluate = "blancops.scripts.evaluate:main"
-run-compare = "blancops.scripts.compare_models:main"
+run-eval = "blancops.scripts.evaluate:main"
+run-model-compare = "blancops.scripts.compare_models:main"
 run-offline-scheduler = "blancops.scripts.run_offline_scheduler:main"
 run-live-scheduler = "blancops.scripts.run_live_scheduler:main"
 run-explain = "blancops.scripts.run_explain:main"
 precompute-train-features = "blancops.scripts.precompute_features:main"
 
 [tool.setuptools.package-data]
-"blancops" = ["configs/*.json", "configs/*.yaml", "configs/templates/*.yaml", "blanco/*.conf"]
+"blancops" = ["configs/*.json", "configs/*.yaml", "configs/templates/*.yaml", "blanco/*.conf",
+              "models/aliases.yml", "models/*/configs/*.yaml", "models/*/checkpoints/model.pt"]
 "blancops.configs" = ["*.json"]
+
+[tool.pytest.ini_options]
+markers = ["slow: end-to-end tests that load a deployable model and roll out a night (deselect with -m 'not slow')"]
