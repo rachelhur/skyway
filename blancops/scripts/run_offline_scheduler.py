@@ -171,6 +171,7 @@ def main():
             )
 
     logger.info(f"Using {outdir} as output directory.")
+    logger.info(f"Using model {args.model_path_or_alias} on device {device}.")
 
     # ------------------------------
     # LOAD TARGET FIELDS
